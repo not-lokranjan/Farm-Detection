@@ -416,6 +416,87 @@
       font-size: 14px;
     }
 
+    .auth {
+      position: fixed;
+      inset: 0;
+      display: none;
+      place-items: center;
+      padding: 24px;
+      background: rgba(2, 5, 8, 0.82);
+      backdrop-filter: blur(18px);
+      z-index: 40;
+    }
+
+    .auth.show { display: grid; }
+
+    .auth-box {
+      width: min(420px, 100%);
+      border: 1px solid rgba(142, 240, 255, 0.28);
+      border-radius: 8px;
+      background: rgba(9, 17, 26, 0.96);
+      padding: 24px;
+      box-shadow: 0 30px 90px rgba(0, 0, 0, 0.55);
+    }
+
+    label {
+      display: grid;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 14px;
+    }
+
+    input, select {
+      width: 100%;
+      min-height: 42px;
+      border: 1px solid rgba(142, 240, 255, 0.22);
+      border-radius: 8px;
+      background: rgba(3, 8, 13, 0.74);
+      color: var(--text);
+      padding: 0 12px;
+      font: inherit;
+    }
+
+    .auth-box button { width: 100%; margin-top: 18px; }
+    .hidden { display: none !important; }
+    button:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+
+    .compact-list {
+      display: grid;
+      gap: 10px;
+      padding: 16px 18px 18px;
+      max-height: 320px;
+      overflow: auto;
+    }
+
+    .row-item {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px 12px;
+      background: rgba(3, 8, 13, 0.48);
+      display: grid;
+      gap: 5px;
+    }
+
+    .row-item strong {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      font-size: 14px;
+    }
+
+    .row-item small { color: var(--muted); }
+
+    .manager {
+      display: grid;
+      grid-template-columns: 1fr 140px;
+      gap: 10px;
+      padding: 16px 18px 18px;
+    }
+
+    .manager input, .manager select, .manager button { min-width: 0; }
+
     @media (max-width: 900px) {
       header, nav { align-items: flex-start; }
       header { flex-direction: column; }
@@ -427,12 +508,22 @@
       nav { order: 3; }
       nav { justify-content: flex-start; }
       .grid { grid-template-columns: 1fr; }
-      .controls, .status-strip, .metrics { grid-template-columns: 1fr; }
+      .controls, .status-strip, .metrics, .manager { grid-template-columns: 1fr; }
       h1 { font-size: 26px; }
     }
   </style>
 </head>
 <body>
+  <div id="auth" class="auth show">
+    <form id="login-form" class="auth-box">
+      <h2>DetectField Login</h2>
+      <label>Username<input id="login-username" autocomplete="username" value="admin"></label>
+      <label>Password<input id="login-password" type="password" autocomplete="current-password"></label>
+      <button class="primary" type="submit">Login</button>
+      <p id="login-error" class="empty"></p>
+    </form>
+  </div>
+
   <div class="shell">
     <header>
       <div class="brand">
@@ -447,6 +538,8 @@
         <span id="global-pi-text">Pi checking</span>
       </div>
       <nav>
+        <span id="user-badge" class="nav-link">Signed out</span>
+        <button id="logout">Logout</button>
         <a class="nav-link" href="#about">About</a>
       </nav>
     </header>
@@ -506,6 +599,41 @@
             <div class="empty">No detections yet</div>
           </div>
         </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Recorded Intervals</h2>
+          </div>
+          <div id="sessions" class="compact-list">
+            <div class="empty">No intervals recorded</div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Event History</h2>
+          </div>
+          <div id="event-history" class="compact-list">
+            <div class="empty">No stored events</div>
+          </div>
+        </section>
+
+        <section id="user-management" class="panel hidden">
+          <div class="panel-head">
+            <h2>User Management</h2>
+          </div>
+          <form id="create-user-form" class="manager">
+            <input id="new-username" placeholder="Username" autocomplete="off">
+            <select id="new-role">
+              <option value="viewer">Viewer</option>
+              <option value="operator">Operator</option>
+              <option value="admin">Admin</option>
+            </select>
+            <input id="new-password" type="password" placeholder="Password" autocomplete="new-password">
+            <button class="primary" type="submit">Add User</button>
+          </form>
+          <div id="users" class="compact-list"></div>
+        </section>
       </aside>
     </main>
 
@@ -525,6 +653,10 @@
     const feedImage = document.getElementById("feed-image");
     const errorBox = document.getElementById("error");
     const toast = document.getElementById("toast");
+    const auth = document.getElementById("auth");
+    const loginForm = document.getElementById("login-form");
+    const loginError = document.getElementById("login-error");
+    let currentUser = null;
     let streamActive = false;
     let latestEventId = 0;
     let toastTimer = null;
@@ -538,8 +670,33 @@
 
     async function post(path) {
       const res = await fetch(path, { method: "POST" });
+      if (res.status === 401) {
+        showLogin();
+        throw new Error("login required");
+      }
       if (!res.ok) throw new Error(`${path} failed`);
       await updateStatus();
+    }
+
+    function canControl() {
+      return currentUser && ["admin", "operator"].includes(currentUser.role);
+    }
+
+    function showLogin() {
+      auth.classList.add("show");
+    }
+
+    function hideLogin() {
+      auth.classList.remove("show");
+    }
+
+    function applyUser(user) {
+      currentUser = user;
+      document.getElementById("user-badge").textContent = user ? `${user.username} · ${user.role}` : "Signed out";
+      document.getElementById("user-management").classList.toggle("hidden", !user || user.role !== "admin");
+      ["start-surveillance", "stop-surveillance"].forEach(id => {
+        document.getElementById(id).disabled = !canControl();
+      });
     }
 
     function setDot(id, ok, warn = false) {
@@ -565,6 +722,8 @@
     function showToast(event) {
       const detail = event.type === "left"
         ? "The last detected subject has left the camera view."
+        : event.type === "presence"
+        ? "Subject still present in the camera view."
         : `${event.label} detected at ${event.confidence}%. Live feed opened.`;
       toast.innerHTML = `<strong>${event.message}</strong><span>${detail}</span>`;
       toast.classList.add("show");
@@ -604,6 +763,7 @@
       feed.classList.toggle("live", data.liveFeedOn);
 
       const power = data.power || {};
+      applyUser(data.user || currentUser);
       document.getElementById("cpu").textContent = power.cpuPercent == null ? "--" : `${Math.round(power.cpuPercent)}%`;
       document.getElementById("memory").textContent = power.memoryPercent == null ? "--" : `${Math.round(power.memoryPercent)}%`;
       document.getElementById("temp").textContent = power.temperature || "--";
@@ -617,10 +777,58 @@
       errorBox.textContent = data.error || "";
     }
 
+    function renderHistory(payload) {
+      const sessions = payload.sessions || [];
+      const events = payload.events || [];
+      document.getElementById("sessions").innerHTML = sessions.length ? sessions.map(item => {
+        const labels = JSON.parse(item.labels || "[]").join(", ") || "Unknown";
+        const end = item.ended_at || "active";
+        return `
+          <div class="row-item">
+            <strong><span>${labels}</span><span>${item.peak_confidence || "--"}%</span></strong>
+            <small>${item.started_at} -> ${end}</small>
+            <small>${item.event_count} events</small>
+          </div>
+        `;
+      }).join("") : `<div class="empty">No intervals recorded</div>`;
+
+      document.getElementById("event-history").innerHTML = events.length ? events.map(item => `
+        <div class="row-item">
+          <strong><span>${item.message}</span><span>${item.confidence == null ? "" : `${item.confidence}%`}</span></strong>
+          <small>${item.event_type} · ${item.created_at}</small>
+        </div>
+      `).join("") : `<div class="empty">No stored events</div>`;
+    }
+
+    async function loadEvents() {
+      if (!currentUser) return;
+      const res = await fetch("/api/events", { cache: "no-store" });
+      if (res.ok) renderHistory(await res.json());
+    }
+
+    async function loadUsers() {
+      if (!currentUser || currentUser.role !== "admin") return;
+      const res = await fetch("/api/users", { cache: "no-store" });
+      if (!res.ok) return;
+      const data = await res.json();
+      document.getElementById("users").innerHTML = data.users.map(user => `
+        <div class="row-item">
+          <strong><span>${user.username}</span><span>${user.role}</span></strong>
+          <small>${user.active ? "active" : "disabled"} · created ${user.created_at}</small>
+        </div>
+      `).join("");
+    }
+
     async function updateStatus() {
       try {
         const res = await fetch("/api/status", { cache: "no-store" });
+        if (res.status === 401) {
+          applyUser(null);
+          showLogin();
+          return;
+        }
         if (!res.ok) throw new Error("status failed");
+        hideLogin();
         applyStatus(await res.json());
       } catch (err) {
         setDot("pi-dot", false);
@@ -631,13 +839,63 @@
       }
     }
 
+    loginForm.addEventListener("submit", async event => {
+      event.preventDefault();
+      loginError.textContent = "";
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: document.getElementById("login-username").value,
+          password: document.getElementById("login-password").value,
+        }),
+      });
+      if (!res.ok) {
+        loginError.textContent = "Invalid username or password";
+        return;
+      }
+      const data = await res.json();
+      applyUser(data.user);
+      hideLogin();
+      await updateStatus();
+      await loadEvents();
+      await loadUsers();
+    });
+
+    document.getElementById("logout").addEventListener("click", async () => {
+      await fetch("/api/auth/logout", { method: "POST" });
+      applyUser(null);
+      showLogin();
+    });
+
+    document.getElementById("create-user-form").addEventListener("submit", async event => {
+      event.preventDefault();
+      const res = await fetch("/api/users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: document.getElementById("new-username").value,
+          password: document.getElementById("new-password").value,
+          role: document.getElementById("new-role").value,
+        }),
+      });
+      if (res.ok) {
+        event.target.reset();
+        await loadUsers();
+      }
+    });
+
     document.getElementById("start-surveillance").addEventListener("click", () => post("/api/surveillance/start"));
     document.getElementById("stop-surveillance").addEventListener("click", () => post("/api/surveillance/stop"));
     document.getElementById("start-feed").addEventListener("click", () => post("/api/feed/start"));
     document.getElementById("stop-feed").addEventListener("click", () => post("/api/feed/stop"));
 
     updateStatus();
+    loadEvents();
+    loadUsers();
     setInterval(updateStatus, 1500);
+    setInterval(loadEvents, 5000);
+    setInterval(loadUsers, 15000);
   </script>
 </body>
 </html>

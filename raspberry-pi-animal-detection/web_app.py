@@ -1,13 +1,21 @@
 import os
+import base64
+import hashlib
+import hmac
+import json
+import secrets
+import sqlite3
 import subprocess
 import threading
 import time
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
+from functools import wraps
+from urllib import parse, request as urlrequest
 
 import cv2
 import psutil
-from flask import Flask, Response, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request, session
 from ultralytics import YOLO
 
 
@@ -22,6 +30,11 @@ DETECT_EVERY_SECONDS = 0.75
 DETECTION_CLEAR_SECONDS = 2.0
 STREAM_FPS = 60
 JPEG_QUALITY = 72
+DB_PATH = os.environ.get("DETECTFIELD_DB", "detectfield.db")
+DEFAULT_ADMIN_USER = os.environ.get("DETECTFIELD_ADMIN_USER", "admin")
+DEFAULT_ADMIN_PASSWORD = os.environ.get("DETECTFIELD_ADMIN_PASSWORD", "detector")
+SESSION_SECRET_PATH = os.environ.get("DETECTFIELD_SECRET_FILE", ".detectfield_secret")
+PRESENCE_EVENT_SECONDS = 15.0
 
 HUMAN_LABELS = {"Person", "Man", "Woman", "Boy", "Girl", "Human body"}
 
@@ -88,6 +101,139 @@ def run_command(command):
         return ""
 
 
+def db_connect():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def utc_now():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def load_secret_key():
+    configured = os.environ.get("DETECTFIELD_SECRET_KEY")
+    if configured:
+        return configured
+    if os.path.exists(SESSION_SECRET_PATH):
+        with open(SESSION_SECRET_PATH, "r", encoding="utf-8") as handle:
+            return handle.read().strip()
+    secret = secrets.token_hex(32)
+    with open(SESSION_SECRET_PATH, "w", encoding="utf-8") as handle:
+        handle.write(secret)
+    os.chmod(SESSION_SECRET_PATH, 0o600)
+    return secret
+
+
+def hash_password(password, salt=None):
+    salt = salt or secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 180000)
+    return f"{salt}${base64.b64encode(digest).decode()}"
+
+
+def verify_password(password, stored):
+    try:
+        salt, digest = stored.split("$", 1)
+    except ValueError:
+        return False
+    return hmac.compare_digest(hash_password(password, salt), stored)
+
+
+def init_db():
+    with db_connect() as conn:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL CHECK(role IN ('admin', 'operator', 'viewer')),
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS detection_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at TEXT NOT NULL,
+                ended_at TEXT,
+                labels TEXT NOT NULL DEFAULT '[]',
+                peak_confidence INTEGER,
+                event_count INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS detection_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER,
+                event_type TEXT NOT NULL,
+                label TEXT,
+                confidence INTEGER,
+                message TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(session_id) REFERENCES detection_sessions(id)
+            );
+            """
+        )
+        existing = conn.execute("SELECT id FROM users LIMIT 1").fetchone()
+        if not existing:
+            conn.execute(
+                "INSERT INTO users (username, password_hash, role, active, created_at) VALUES (?, ?, 'admin', 1, ?)",
+                (DEFAULT_ADMIN_USER, hash_password(DEFAULT_ADMIN_PASSWORD), utc_now()),
+            )
+
+
+def current_user():
+    user_id = session.get("user_id")
+    if not user_id:
+        return None
+    with db_connect() as conn:
+        row = conn.execute(
+            "SELECT id, username, role, active FROM users WHERE id = ? AND active = 1",
+            (user_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def require_role(*roles):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            user = current_user()
+            if not user:
+                return jsonify({"error": "login_required"}), 401
+            if roles and user["role"] not in roles:
+                return jsonify({"error": "forbidden"}), 403
+            return func(*args, **kwargs)
+
+        return wrapper
+
+    return decorator
+
+
+def send_whatsapp_alert(message):
+    sid = os.environ.get("TWILIO_ACCOUNT_SID", "").strip()
+    token = os.environ.get("TWILIO_AUTH_TOKEN", "").strip()
+    sender = os.environ.get("TWILIO_WHATSAPP_FROM", "").strip()
+    recipient = os.environ.get("ALERT_WHATSAPP_TO", "").strip()
+    if not all([sid, token, sender, recipient]):
+        return
+
+    def worker():
+        data = parse.urlencode({"From": sender, "To": recipient, "Body": message}).encode()
+        req = urlrequest.Request(
+            f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json",
+            data=data,
+            method="POST",
+        )
+        auth = base64.b64encode(f"{sid}:{token}".encode()).decode()
+        req.add_header("Authorization", f"Basic {auth}")
+        try:
+            urlrequest.urlopen(req, timeout=8).read()
+        except Exception:
+            pass
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
 class SurveillanceEngine:
     def __init__(self):
         self.lock = threading.RLock()
@@ -110,6 +256,10 @@ class SurveillanceEngine:
         self.last_detection_labels = set()
         self.last_detection_run = 0.0
         self.last_seen_time = 0.0
+        self.active_session_id = None
+        self.session_labels = set()
+        self.session_peak_confidence = None
+        self.last_presence_event_time = 0.0
         self.notifications = deque(maxlen=50)
         self.error = ""
 
@@ -131,6 +281,7 @@ class SurveillanceEngine:
             self.last_detection_labels = set()
             self.was_detecting = False
             self.alert_live_feed_on = False
+            self._close_active_session()
             if not self.manual_live_feed_on:
                 self.error = ""
                 self._stop_thread_locked()
@@ -300,11 +451,13 @@ class SurveillanceEngine:
         current = {label for *_, label, _ in boxes}
         new_labels = sorted(current - self.last_detection_labels)
         timestamp = datetime.now().strftime("%H:%M:%S")
+        now = time.time()
 
         if current:
             with self.lock:
                 self.alert_live_feed_on = True
-                self.last_seen_time = time.time()
+                self.last_seen_time = now
+            self._ensure_active_session(boxes)
 
         if new_labels:
             for label in new_labels:
@@ -317,7 +470,18 @@ class SurveillanceEngine:
                     message=f"DETECTED: {label}",
                 )
 
-        enough_time_clear = time.time() - self.last_seen_time >= DETECTION_CLEAR_SECONDS
+        if current and not new_labels and now - self.last_presence_event_time >= PRESENCE_EVENT_SECONDS:
+            best_label, best_conf = self._best_detection(boxes)
+            self.last_presence_event_time = now
+            self._push_event(
+                event_type="presence",
+                timestamp=timestamp,
+                label=best_label,
+                confidence=round(best_conf * 100),
+                message=f"Presence: {', '.join(sorted(current))}",
+            )
+
+        enough_time_clear = now - self.last_seen_time >= DETECTION_CLEAR_SECONDS
         if self.was_detecting and not current and enough_time_clear:
             self.alert_live_feed_on = False
             self._push_event(
@@ -327,23 +491,76 @@ class SurveillanceEngine:
                 confidence=None,
                 message="Left feed",
             )
+            self._close_active_session()
 
         if current or enough_time_clear:
             self.was_detecting = bool(current)
             self.last_detection_labels = current
 
+    def _best_detection(self, boxes):
+        best = max(boxes, key=lambda box: box[5])
+        return best[4], best[5]
+
+    def _ensure_active_session(self, boxes):
+        labels = {label for *_, label, _ in boxes}
+        best_confidence = round(max(conf for *_, conf in boxes) * 100)
+        now = utc_now()
+        if self.active_session_id is None:
+            with db_connect() as conn:
+                cursor = conn.execute(
+                    "INSERT INTO detection_sessions (started_at, labels, peak_confidence) VALUES (?, ?, ?)",
+                    (now, json.dumps(sorted(labels)), best_confidence),
+                )
+                self.active_session_id = cursor.lastrowid
+            self.session_labels = labels
+            self.session_peak_confidence = best_confidence
+            self.last_presence_event_time = time.time()
+            return
+
+        self.session_labels.update(labels)
+        self.session_peak_confidence = max(self.session_peak_confidence or 0, best_confidence)
+        with db_connect() as conn:
+            conn.execute(
+                "UPDATE detection_sessions SET labels = ?, peak_confidence = ? WHERE id = ?",
+                (json.dumps(sorted(self.session_labels)), self.session_peak_confidence, self.active_session_id),
+            )
+
+    def _close_active_session(self):
+        if self.active_session_id is None:
+            return
+        with db_connect() as conn:
+            conn.execute(
+                "UPDATE detection_sessions SET ended_at = ? WHERE id = ?",
+                (utc_now(), self.active_session_id),
+            )
+        self.active_session_id = None
+        self.session_labels = set()
+        self.session_peak_confidence = None
+        self.last_presence_event_time = 0.0
+
     def _push_event(self, event_type, timestamp, label, confidence, message):
         self.last_event_id += 1
-        self.notifications.appendleft(
-            {
-                "id": self.last_event_id,
-                "type": event_type,
-                "time": timestamp,
-                "label": label,
-                "confidence": confidence,
-                "message": message,
-            }
-        )
+        event = {
+            "id": self.last_event_id,
+            "type": event_type,
+            "time": timestamp,
+            "label": label,
+            "confidence": confidence,
+            "message": message,
+        }
+        self.notifications.appendleft(event)
+        with db_connect() as conn:
+            conn.execute(
+                "INSERT INTO detection_events (session_id, event_type, label, confidence, message, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (self.active_session_id, event_type, label, confidence, message, utc_now()),
+            )
+            if self.active_session_id is not None:
+                conn.execute(
+                    "UPDATE detection_sessions SET event_count = event_count + 1 WHERE id = ?",
+                    (self.active_session_id,),
+                )
+        if event_type == "detected":
+            send_whatsapp_alert(f"DetectField alert: {message} at {timestamp}.")
 
     def stream(self):
         boundary = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
@@ -375,8 +592,10 @@ class SurveillanceEngine:
             }
 
 
-engine = SurveillanceEngine()
 app = Flask(__name__)
+app.secret_key = load_secret_key()
+init_db()
+engine = SurveillanceEngine()
 
 
 @app.route("/")
@@ -384,38 +603,160 @@ def index():
     return render_template("index.html")
 
 
+@app.post("/api/auth/login")
+def login():
+    payload = request.get_json(silent=True) or {}
+    username = str(payload.get("username", "")).strip()
+    password = str(payload.get("password", ""))
+    with db_connect() as conn:
+        row = conn.execute(
+            "SELECT id, username, password_hash, role, active FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()
+    if not row or not row["active"] or not verify_password(password, row["password_hash"]):
+        return jsonify({"error": "invalid_login"}), 401
+    session.clear()
+    session["user_id"] = row["id"]
+    return jsonify({"user": {"id": row["id"], "username": row["username"], "role": row["role"]}})
+
+
+@app.post("/api/auth/logout")
+def logout():
+    session.clear()
+    return jsonify({"ok": True})
+
+
+@app.get("/api/auth/me")
+def auth_me():
+    user = current_user()
+    if not user:
+        return jsonify({"user": None}), 401
+    return jsonify({"user": user})
+
+
+@app.get("/api/users")
+@require_role("admin")
+def list_users():
+    with db_connect() as conn:
+        rows = conn.execute(
+            "SELECT id, username, role, active, created_at FROM users ORDER BY username"
+        ).fetchall()
+    return jsonify({"users": [dict(row) for row in rows]})
+
+
+@app.post("/api/users")
+@require_role("admin")
+def create_user():
+    payload = request.get_json(silent=True) or {}
+    username = str(payload.get("username", "")).strip()
+    password = str(payload.get("password", ""))
+    role = str(payload.get("role", "viewer")).strip()
+    if not username or not password or role not in {"admin", "operator", "viewer"}:
+        return jsonify({"error": "invalid_user"}), 400
+    try:
+        with db_connect() as conn:
+            conn.execute(
+                "INSERT INTO users (username, password_hash, role, active, created_at) VALUES (?, ?, ?, 1, ?)",
+                (username, hash_password(password), role, utc_now()),
+            )
+    except sqlite3.IntegrityError:
+        return jsonify({"error": "username_exists"}), 409
+    return jsonify({"ok": True})
+
+
+@app.patch("/api/users/<int:user_id>")
+@require_role("admin")
+def update_user(user_id):
+    payload = request.get_json(silent=True) or {}
+    fields = []
+    values = []
+    if "role" in payload:
+        role = str(payload["role"]).strip()
+        if role not in {"admin", "operator", "viewer"}:
+            return jsonify({"error": "invalid_role"}), 400
+        fields.append("role = ?")
+        values.append(role)
+    if "active" in payload:
+        fields.append("active = ?")
+        values.append(1 if payload["active"] else 0)
+    if "password" in payload and payload["password"]:
+        fields.append("password_hash = ?")
+        values.append(hash_password(str(payload["password"])))
+    if not fields:
+        return jsonify({"ok": True})
+    values.append(user_id)
+    with db_connect() as conn:
+        conn.execute(f"UPDATE users SET {', '.join(fields)} WHERE id = ?", values)
+    return jsonify({"ok": True})
+
+
 @app.post("/api/surveillance/start")
+@require_role("admin", "operator")
 def start_surveillance():
     engine.start_surveillance()
     return jsonify(engine.snapshot())
 
 
 @app.post("/api/surveillance/stop")
+@require_role("admin", "operator")
 def stop_surveillance():
     engine.stop_surveillance()
     return jsonify(engine.snapshot())
 
 
 @app.post("/api/feed/start")
+@require_role("admin", "operator", "viewer")
 def start_feed():
     engine.start_live_feed()
     return jsonify(engine.snapshot())
 
 
 @app.post("/api/feed/stop")
+@require_role("admin", "operator", "viewer")
 def stop_feed():
     engine.stop_live_feed()
     return jsonify(engine.snapshot())
 
 
 @app.get("/api/status")
+@require_role("admin", "operator", "viewer")
 def status():
     payload = engine.snapshot()
     payload["power"] = power_status()
+    payload["user"] = current_user()
     return jsonify(payload)
 
 
+@app.get("/api/events")
+@require_role("admin", "operator", "viewer")
+def events():
+    with db_connect() as conn:
+        event_rows = conn.execute(
+            """
+            SELECT id, session_id, event_type, label, confidence, message, created_at
+            FROM detection_events
+            ORDER BY id DESC
+            LIMIT 80
+            """
+        ).fetchall()
+        session_rows = conn.execute(
+            """
+            SELECT id, started_at, ended_at, labels, peak_confidence, event_count
+            FROM detection_sessions
+            ORDER BY id DESC
+            LIMIT 30
+            """
+        ).fetchall()
+    return jsonify(
+        {
+            "events": [dict(row) for row in event_rows],
+            "sessions": [dict(row) for row in session_rows],
+        }
+    )
+
+
 @app.get("/stream")
+@require_role("admin", "operator", "viewer")
 def stream():
     return Response(engine.stream(), mimetype="multipart/x-mixed-replace; boundary=frame")
 

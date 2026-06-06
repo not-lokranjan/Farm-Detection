@@ -41,6 +41,53 @@ curl -I http://127.0.0.1:8080/
 curl http://127.0.0.1:8080/api/status
 ```
 
+## Login, Roles, And Events
+
+The dashboard uses local Flask sessions and SQLite. No Firebase is required for the current single-Pi setup.
+
+Default first-run login:
+
+- Username: `admin`
+- Password: `detector`
+
+Override before first launch:
+
+```bash
+DETECTFIELD_ADMIN_USER=admin DETECTFIELD_ADMIN_PASSWORD='change-me' python web_app.py
+```
+
+Roles:
+
+- `admin` - surveillance controls and user management.
+- `operator` - surveillance controls.
+- `viewer` - dashboard and live feed access.
+
+Database file:
+
+```bash
+/home/project/detection/detectfield.db
+```
+
+Stored records:
+
+- `detection_events` - initial detection, continuing presence heartbeat, and exit.
+- `detection_sessions` - active detection interval with start time, end time, labels, peak confidence, and event count.
+
+The app keeps a short no-detection grace window before closing an event interval, so split-second YOLO misses do not create false exits.
+
+## WhatsApp Alerts
+
+WhatsApp alerts are optional and currently wired for Twilio WhatsApp. Set these environment variables in the systemd service or shell:
+
+```bash
+TWILIO_ACCOUNT_SID=...
+TWILIO_AUTH_TOKEN=...
+TWILIO_WHATSAPP_FROM=whatsapp:+14155238886
+ALERT_WHATSAPP_TO=whatsapp:+15551234567
+```
+
+Alerts fire on initial detection. If these variables are missing, the app still runs without phone alerts.
+
 ## Camera Notes
 
 The app scans USB camera indexes `0-5` by default. Override the source with:
