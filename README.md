@@ -74,6 +74,7 @@ Stored records:
 - `detection_sessions` - active detection interval with start time, end time, labels, peak confidence, and event count.
 
 The app keeps a short no-detection grace window before closing an event interval, so split-second YOLO misses do not create false exits.
+The default detection hold is 12 seconds and can be changed in Settings. This keeps one clip/session open when YOLO briefly loses a subject that is still in frame.
 
 ## Clip Archive And Settings
 

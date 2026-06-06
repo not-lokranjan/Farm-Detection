@@ -27,7 +27,7 @@ FRAME_WIDTH = 960
 FRAME_HEIGHT = 540
 CONFIDENCE = 0.30
 DETECT_EVERY_SECONDS = 0.75
-DETECTION_CLEAR_SECONDS = 2.0
+DETECTION_CLEAR_SECONDS = 12.0
 STREAM_FPS = 60
 JPEG_QUALITY = 72
 DB_PATH = os.environ.get("DETECTFIELD_DB", "detectfield.db")
@@ -44,6 +44,7 @@ SETTINGS_DEFAULTS = {
     "viewer_feed_access": "1",
     "camera_source": "",
     "clip_storage": "local",
+    "detection_hold_seconds": "12",
 }
 LAST_CLIP_CLEANUP = 0.0
 
@@ -247,6 +248,7 @@ def public_settings(settings=None):
         "viewerFeedAccess": bool_setting(settings, "viewer_feed_access"),
         "cameraSource": settings.get("camera_source", ""),
         "clipStorage": settings.get("clip_storage", "local"),
+        "detectionHoldSeconds": int_setting(settings, "detection_hold_seconds", 5, 30),
     }
 
 
@@ -439,6 +441,9 @@ class SurveillanceEngine:
         with self.lock:
             self.settings = load_settings()
 
+    def detection_clear_seconds(self):
+        return int_setting(self.settings, "detection_hold_seconds", 5, 30)
+
     def ensure_model(self):
         if self.model is None:
             self.model = YOLO(MODEL_PATH)
@@ -600,7 +605,9 @@ class SurveillanceEngine:
             self._record_detection_state(boxes)
 
             with self.lock:
-                self.last_boxes = boxes
+                absence_seconds = time.time() - self.last_seen_time
+                if boxes or absence_seconds >= self.detection_clear_seconds():
+                    self.last_boxes = boxes
 
     def detect(self, frame):
         self.ensure_model()
@@ -666,7 +673,7 @@ class SurveillanceEngine:
                 message=f"Presence: {', '.join(sorted(current))}",
             )
 
-        enough_time_clear = now - self.last_seen_time >= DETECTION_CLEAR_SECONDS
+        enough_time_clear = now - self.last_seen_time >= self.detection_clear_seconds()
         if self.was_detecting and not current and enough_time_clear:
             self.alert_live_feed_on = False
             self._push_event(
@@ -1056,6 +1063,14 @@ def update_settings():
             return jsonify({"error": "invalid_recording_fps"}), 400
     if "cameraSource" in payload:
         updates["camera_source"] = str(payload["cameraSource"]).strip()
+    if "detectionHoldSeconds" in payload:
+        try:
+            hold_seconds = int(payload["detectionHoldSeconds"])
+        except (TypeError, ValueError):
+            return jsonify({"error": "invalid_detection_hold"}), 400
+        if hold_seconds not in {5, 10, 12, 15, 20, 30}:
+            return jsonify({"error": "invalid_detection_hold"}), 400
+        updates["detection_hold_seconds"] = str(hold_seconds)
     if "clipStorage" in payload:
         clip_storage = str(payload["clipStorage"]).strip()
         if clip_storage not in {"local", "firebase"}:

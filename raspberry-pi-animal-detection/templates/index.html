@@ -762,6 +762,7 @@
           <div class="panel-head"><h2>Camera</h2></div>
           <div class="setting-body">
             <label><span>Camera Source</span><input id="camera-source" placeholder="Auto, 0, 1, or /dev/video0"></label>
+            <label><span>Detection Hold</span><select id="detection-hold-seconds"><option value="5">5 seconds</option><option value="10">10 seconds</option><option value="12">12 seconds</option><option value="15">15 seconds</option><option value="20">20 seconds</option><option value="30">30 seconds</option></select></label>
             <div class="empty">Camera changes apply next time feed or surveillance starts.</div>
           </div>
         </section>
@@ -1038,6 +1039,7 @@
       document.getElementById("recording-fps").value = currentSettings.recordingFps;
       document.getElementById("viewer-feed-access").value = currentSettings.viewerFeedAccess ? "1" : "0";
       document.getElementById("camera-source").value = currentSettings.cameraSource || "";
+      document.getElementById("detection-hold-seconds").value = String(currentSettings.detectionHoldSeconds || 12);
       applyUser(currentUser);
     }
 
@@ -1170,6 +1172,7 @@
           recordingFps: Number(document.getElementById("recording-fps").value),
           viewerFeedAccess: document.getElementById("viewer-feed-access").value === "1",
           cameraSource: document.getElementById("camera-source").value,
+          detectionHoldSeconds: Number(document.getElementById("detection-hold-seconds").value),
         }),
       });
       document.getElementById("settings-message").textContent = res.ok ? "Saved" : "Save failed";
