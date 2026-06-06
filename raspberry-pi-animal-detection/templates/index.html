@@ -827,6 +827,7 @@
     let currentSettings = null;
     let streamActive = false;
     let latestEventId = 0;
+    let eventStreamPrimed = false;
     let toastTimer = null;
 
     function formatUptime(seconds) {
@@ -927,6 +928,11 @@
     function processEvents(events) {
       if (!events.length) return;
       const newest = events[0];
+      if (!eventStreamPrimed) {
+        latestEventId = newest.id || 0;
+        eventStreamPrimed = true;
+        return;
+      }
       if (newest.id && newest.id > latestEventId) {
         latestEventId = newest.id;
         showToast(newest);

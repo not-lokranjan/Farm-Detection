@@ -27,7 +27,7 @@ FRAME_WIDTH = 960
 FRAME_HEIGHT = 540
 CONFIDENCE = 0.30
 DETECT_EVERY_SECONDS = 0.75
-DETECTION_CLEAR_SECONDS = 12.0
+DETECTION_CLEAR_SECONDS = 30.0
 STREAM_FPS = 60
 JPEG_QUALITY = 72
 DB_PATH = os.environ.get("DETECTFIELD_DB", "detectfield.db")
@@ -44,7 +44,7 @@ SETTINGS_DEFAULTS = {
     "viewer_feed_access": "1",
     "camera_source": "",
     "clip_storage": "local",
-    "detection_hold_seconds": "12",
+    "detection_hold_seconds": "30",
 }
 LAST_CLIP_CLEANUP = 0.0
 
