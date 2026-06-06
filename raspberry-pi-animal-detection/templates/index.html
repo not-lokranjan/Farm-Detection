@@ -893,6 +893,28 @@
       return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
     }
 
+    function formatDateTime(value) {
+      if (!value) return "Active";
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return value;
+      return date.toLocaleString([], {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+        second: "2-digit",
+      });
+    }
+
+    function formatDuration(start, end) {
+      if (!start || !end) return "Recording active";
+      const seconds = Math.max(0, Math.round((new Date(end) - new Date(start)) / 1000));
+      const minutes = Math.floor(seconds / 60);
+      const rest = seconds % 60;
+      return minutes ? `${minutes}m ${rest}s` : `${rest}s`;
+    }
+
     function setDot(id, ok, warn = false) {
       const el = document.getElementById(id);
       el.classList.toggle("ok", ok);
@@ -1062,7 +1084,9 @@
           <div class="row-item clip">
             ${ready ? `<video controls preload="metadata" src="${clip.url}"></video>` : `<div class="empty">Clip ${clip.upload_status || "processing"}</div>`}
             <strong><span>${labels}</span><span>${clip.peak_confidence || "--"}%</span></strong>
-            <small>${clip.started_at} -> ${clip.ended_at || "active"} · ${clip.upload_status || "stored"} · ${formatSize(clip.sizeBytes)}</small>
+            <small>Detected: ${formatDateTime(clip.started_at)}</small>
+            <small>Left: ${formatDateTime(clip.ended_at)}</small>
+            <small>Duration: ${formatDuration(clip.started_at, clip.ended_at)} · ${clip.upload_status || "stored"} · ${formatSize(clip.sizeBytes)}</small>
             <div class="clip-actions">
               <button data-play-clip="${clip.url}" data-clip-title="${labels}" ${ready ? "" : "disabled"}>Play Large</button>
               <button class="danger" data-delete-clip="${clip.id}">Delete</button>
