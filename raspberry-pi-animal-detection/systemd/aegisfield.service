@@ -1,0 +1,16 @@
+[Unit]
+Description=DetectField Raspberry Pi Surveillance Dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=project
+WorkingDirectory=/home/project/detection
+ExecStart=/home/project/detection/venv/bin/python /home/project/detection/web_app.py
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,643 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DetectField</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #05070b;
+      --panel: rgba(13, 20, 30, 0.82);
+      --panel-strong: rgba(16, 27, 40, 0.94);
+      --line: rgba(142, 240, 255, 0.18);
+      --text: #edf7ff;
+      --muted: #8ea6b4;
+      --cyan: #27d9ff;
+      --green: #54ff9f;
+      --red: #ff5d73;
+      --amber: #ffcc66;
+      --blue: #7aa8ff;
+    }
+
+    * { box-sizing: border-box; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 18% 12%, rgba(39, 217, 255, 0.16), transparent 26%),
+        radial-gradient(circle at 82% 10%, rgba(84, 255, 159, 0.08), transparent 24%),
+        linear-gradient(135deg, #05070b 0%, #081019 45%, #040609 100%);
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background-image:
+        linear-gradient(rgba(255,255,255,0.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,0.035) 1px, transparent 1px);
+      background-size: 46px 46px;
+      mask-image: linear-gradient(to bottom, rgba(0,0,0,0.75), transparent);
+    }
+
+    .shell {
+      width: min(1240px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 24px 0 56px;
+    }
+
+    header {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      padding: 18px 0 24px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      min-width: 0;
+    }
+
+    .mark {
+      width: 42px;
+      height: 42px;
+      border: 1px solid rgba(39, 217, 255, 0.55);
+      background: linear-gradient(135deg, rgba(39, 217, 255, 0.22), rgba(84, 255, 159, 0.08));
+      clip-path: polygon(50% 0, 94% 25%, 94% 75%, 50% 100%, 6% 75%, 6% 25%);
+      box-shadow: 0 0 28px rgba(39, 217, 255, 0.28);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 30px;
+      line-height: 1;
+      letter-spacing: 0;
+    }
+
+    .subtitle {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .top-status {
+      position: absolute;
+      left: 50%;
+      top: 22px;
+      transform: translateX(-50%);
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      min-height: 40px;
+      padding: 0 16px;
+      border-radius: 999px;
+      border: 1px solid rgba(142, 240, 255, 0.24);
+      background: rgba(9, 17, 26, 0.84);
+      box-shadow: 0 0 28px rgba(39, 217, 255, 0.10);
+      font-weight: 800;
+      white-space: nowrap;
+    }
+
+    .top-status span:last-child {
+      color: var(--muted);
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0;
+    }
+
+    nav {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    button, .nav-link {
+      border: 1px solid rgba(142, 240, 255, 0.22);
+      background: rgba(9, 17, 26, 0.78);
+      color: var(--text);
+      min-height: 42px;
+      padding: 0 16px;
+      border-radius: 8px;
+      font: inherit;
+      cursor: pointer;
+      transition: border-color 120ms ease, transform 120ms ease, background 120ms ease;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      white-space: nowrap;
+    }
+
+    button:hover, .nav-link:hover {
+      border-color: rgba(39, 217, 255, 0.72);
+      background: rgba(15, 31, 45, 0.92);
+      transform: translateY(-1px);
+    }
+
+    button.primary {
+      background: linear-gradient(135deg, rgba(39, 217, 255, 0.28), rgba(84, 255, 159, 0.16));
+      border-color: rgba(39, 217, 255, 0.65);
+    }
+
+    button.danger {
+      border-color: rgba(255, 93, 115, 0.55);
+      color: #ffdce2;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.45fr) minmax(320px, 0.75fr);
+      gap: 18px;
+      align-items: start;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.34);
+      backdrop-filter: blur(18px);
+    }
+
+    .feed-panel {
+      overflow: hidden;
+    }
+
+    .feed-head, .panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 16px 18px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    h2 {
+      margin: 0;
+      font-size: 17px;
+      font-weight: 700;
+      letter-spacing: 0;
+    }
+
+    .feed {
+      aspect-ratio: 16 / 9;
+      background:
+        linear-gradient(135deg, rgba(39, 217, 255, 0.10), transparent),
+        #020407;
+      display: grid;
+      place-items: center;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .feed img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: none;
+      background: #020407;
+    }
+
+    .feed.live img { display: block; }
+    .feed.live .feed-placeholder { display: none; }
+
+    .feed-placeholder {
+      width: min(520px, 80%);
+      text-align: center;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+
+    .target-ring {
+      width: 120px;
+      height: 120px;
+      border: 1px solid rgba(39, 217, 255, 0.45);
+      border-radius: 50%;
+      margin: 0 auto 18px;
+      position: relative;
+      box-shadow: 0 0 36px rgba(39, 217, 255, 0.16);
+    }
+
+    .target-ring::before, .target-ring::after {
+      content: "";
+      position: absolute;
+      inset: 22px;
+      border: 1px solid rgba(84, 255, 159, 0.28);
+      border-radius: 50%;
+    }
+
+    .target-ring::after {
+      inset: 50%;
+      width: 1px;
+      height: 72px;
+      transform: translate(-50%, -50%);
+      border: 0;
+      background: rgba(39, 217, 255, 0.65);
+      box-shadow: 0 0 18px rgba(39, 217, 255, 0.45);
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      padding: 16px 18px 18px;
+    }
+
+    .status-strip {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      padding: 0 18px 18px;
+    }
+
+    .status-card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      background: rgba(3, 8, 13, 0.48);
+    }
+
+    .status-label {
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0;
+      margin-bottom: 7px;
+    }
+
+    .status-value {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 700;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--red);
+      box-shadow: 0 0 14px currentColor;
+    }
+
+    .dot.ok { background: var(--green); color: var(--green); }
+    .dot.warn { background: var(--amber); color: var(--amber); }
+
+    .side {
+      display: grid;
+      gap: 18px;
+    }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      padding: 16px 18px 18px;
+    }
+
+    .metric {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      background: rgba(3, 8, 13, 0.48);
+      min-height: 78px;
+    }
+
+    .metric span {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 8px;
+    }
+
+    .metric strong {
+      display: block;
+      font-size: 22px;
+      line-height: 1.1;
+    }
+
+    .notifications {
+      display: grid;
+      gap: 10px;
+      padding: 16px 18px 18px;
+      min-height: 248px;
+      align-content: start;
+    }
+
+    .event {
+      border: 1px solid rgba(84, 255, 159, 0.22);
+      border-radius: 8px;
+      padding: 11px 12px;
+      background: rgba(84, 255, 159, 0.06);
+      display: grid;
+      gap: 4px;
+    }
+
+    .event.left {
+      border-color: rgba(255, 204, 102, 0.30);
+      background: rgba(255, 204, 102, 0.08);
+    }
+
+    .event-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      font-weight: 700;
+    }
+
+    .event small { color: var(--muted); }
+    .empty { color: var(--muted); line-height: 1.5; }
+
+    .about {
+      margin-top: 18px;
+      padding: 24px;
+      background: var(--panel-strong);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+
+    .about p {
+      color: #bfd0da;
+      max-width: 820px;
+      line-height: 1.65;
+      margin: 12px 0 0;
+    }
+
+    .error {
+      color: #ffdce2;
+      min-height: 22px;
+      padding: 0 18px 16px;
+      font-size: 14px;
+    }
+
+    .toast {
+      position: fixed;
+      right: 24px;
+      bottom: 24px;
+      min-width: min(360px, calc(100vw - 48px));
+      max-width: 420px;
+      padding: 16px 18px;
+      border-radius: 8px;
+      border: 1px solid rgba(39, 217, 255, 0.42);
+      background: rgba(7, 14, 22, 0.95);
+      box-shadow: 0 18px 60px rgba(0, 0, 0, 0.44), 0 0 28px rgba(39, 217, 255, 0.12);
+      transform: translateY(24px);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 160ms ease, transform 160ms ease;
+      z-index: 20;
+    }
+
+    .toast.show {
+      transform: translateY(0);
+      opacity: 1;
+    }
+
+    .toast strong {
+      display: block;
+      margin-bottom: 4px;
+    }
+
+    .toast span {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    @media (max-width: 900px) {
+      header, nav { align-items: flex-start; }
+      header { flex-direction: column; }
+      .top-status {
+        position: static;
+        transform: none;
+        order: 2;
+      }
+      nav { order: 3; }
+      nav { justify-content: flex-start; }
+      .grid { grid-template-columns: 1fr; }
+      .controls, .status-strip, .metrics { grid-template-columns: 1fr; }
+      h1 { font-size: 26px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <div class="brand">
+        <div class="mark" aria-hidden="true"></div>
+        <div>
+          <h1>DetectField</h1>
+          <p class="subtitle">Raspberry Pi wildlife surveillance console</p>
+        </div>
+      </div>
+      <div id="global-pi-status" class="top-status">
+        <span id="global-pi-dot" class="dot"></span>
+        <span id="global-pi-text">Pi checking</span>
+      </div>
+      <nav>
+        <a class="nav-link" href="#about">About</a>
+      </nav>
+    </header>
+
+    <main class="grid">
+      <section class="panel feed-panel">
+        <div class="feed-head">
+          <h2>Live Feed</h2>
+          <div class="status-value"><span id="camera-dot" class="dot"></span><span id="camera-text">Camera idle</span></div>
+        </div>
+        <div id="feed" class="feed">
+          <img id="feed-image" alt="Live camera feed">
+          <div class="feed-placeholder">
+            <div class="target-ring"></div>
+            <div>Feed inactive</div>
+          </div>
+        </div>
+        <div class="controls">
+          <button class="primary" id="start-surveillance">Start Surveillance</button>
+          <button class="danger" id="stop-surveillance">Stop Surveillance</button>
+          <button id="start-feed">Access Live Feed</button>
+          <button id="stop-feed">Stop Accessing Live Feed</button>
+        </div>
+        <div class="status-strip">
+          <div class="status-card">
+            <div class="status-label">Pi Status</div>
+            <div class="status-value"><span id="pi-dot" class="dot"></span><span id="pi-status">Checking</span></div>
+          </div>
+          <div class="status-card">
+            <div class="status-label">Surveillance</div>
+            <div class="status-value"><span id="surveillance-dot" class="dot"></span><span id="surveillance-status">Off</span></div>
+          </div>
+        </div>
+        <div id="error" class="error"></div>
+      </section>
+
+      <aside class="side">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Power Usage</h2>
+          </div>
+          <div class="metrics">
+            <div class="metric"><span>CPU Load</span><strong id="cpu">--</strong></div>
+            <div class="metric"><span>Memory</span><strong id="memory">--</strong></div>
+            <div class="metric"><span>Temperature</span><strong id="temp">--</strong></div>
+            <div class="metric"><span>Core Voltage</span><strong id="voltage">--</strong></div>
+            <div class="metric"><span>Throttle Flags</span><strong id="throttled">--</strong></div>
+            <div class="metric"><span>Uptime</span><strong id="uptime">--</strong></div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Detections</h2>
+          </div>
+          <div id="notifications" class="notifications">
+            <div class="empty">No detections yet</div>
+          </div>
+        </section>
+      </aside>
+    </main>
+
+    <section id="about" class="about">
+      <h2>About DetectField</h2>
+      <p>
+        DetectField runs animal and human detection directly on a Raspberry Pi using the attached camera.
+        The dashboard exposes surveillance controls, live camera access, device health, and event alerts over the local network.
+        Detection happens on the Pi, so any phone, laptop, or tablet on the same network can operate the system through this page.
+      </p>
+    </section>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script>
+    const feed = document.getElementById("feed");
+    const feedImage = document.getElementById("feed-image");
+    const errorBox = document.getElementById("error");
+    const toast = document.getElementById("toast");
+    let streamActive = false;
+    let latestEventId = 0;
+    let toastTimer = null;
+
+    function formatUptime(seconds) {
+      const h = Math.floor(seconds / 3600);
+      const m = Math.floor((seconds % 3600) / 60);
+      if (h > 0) return `${h}h ${m}m`;
+      return `${m}m`;
+    }
+
+    async function post(path) {
+      const res = await fetch(path, { method: "POST" });
+      if (!res.ok) throw new Error(`${path} failed`);
+      await updateStatus();
+    }
+
+    function setDot(id, ok, warn = false) {
+      const el = document.getElementById(id);
+      el.classList.toggle("ok", ok);
+      el.classList.toggle("warn", warn);
+    }
+
+    function renderNotifications(events) {
+      const root = document.getElementById("notifications");
+      if (!events.length) {
+        root.innerHTML = `<div class="empty">No detections yet</div>`;
+        return;
+      }
+      root.innerHTML = events.slice(0, 8).map(event => `
+        <div class="event ${event.type === "left" ? "left" : ""}">
+          <div class="event-top"><span>${event.message}</span><span>${event.confidence == null ? "" : `${event.confidence}%`}</span></div>
+          <small>${event.time}</small>
+        </div>
+      `).join("");
+    }
+
+    function showToast(event) {
+      const detail = event.type === "left"
+        ? "The last detected subject has left the camera view."
+        : `${event.label} detected at ${event.confidence}%. Live feed opened.`;
+      toast.innerHTML = `<strong>${event.message}</strong><span>${detail}</span>`;
+      toast.classList.add("show");
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toast.classList.remove("show"), 4200);
+    }
+
+    function processEvents(events) {
+      if (!events.length) return;
+      const newest = events[0];
+      if (newest.id && newest.id > latestEventId) {
+        latestEventId = newest.id;
+        showToast(newest);
+      }
+    }
+
+    function applyStatus(data) {
+      setDot("pi-dot", data.piOnline);
+      document.getElementById("pi-status").textContent = data.piOnline ? "Online" : "Offline";
+      setDot("global-pi-dot", data.piOnline);
+      document.getElementById("global-pi-text").textContent = data.piOnline ? "Pi online" : "Pi offline";
+
+      setDot("surveillance-dot", data.surveillanceOn);
+      document.getElementById("surveillance-status").textContent = data.surveillanceOn ? "On" : "Off";
+
+      setDot("camera-dot", data.cameraActive, data.liveFeedOn && !data.cameraActive);
+      document.getElementById("camera-text").textContent = data.cameraActive ? `Camera ${data.cameraSource || "active"}` : "Camera idle";
+
+      if (data.liveFeedOn && !streamActive) {
+        feedImage.src = `/stream?t=${Date.now()}`;
+        streamActive = true;
+      }
+      if (!data.liveFeedOn && streamActive) {
+        feedImage.removeAttribute("src");
+        streamActive = false;
+      }
+      feed.classList.toggle("live", data.liveFeedOn);
+
+      const power = data.power || {};
+      document.getElementById("cpu").textContent = power.cpuPercent == null ? "--" : `${Math.round(power.cpuPercent)}%`;
+      document.getElementById("memory").textContent = power.memoryPercent == null ? "--" : `${Math.round(power.memoryPercent)}%`;
+      document.getElementById("temp").textContent = power.temperature || "--";
+      document.getElementById("voltage").textContent = power.coreVoltage || "--";
+      document.getElementById("throttled").textContent = power.throttled || "--";
+      document.getElementById("uptime").textContent = power.uptimeSeconds == null ? "--" : formatUptime(power.uptimeSeconds);
+
+      const detections = data.detections || [];
+      renderNotifications(detections);
+      processEvents(detections);
+      errorBox.textContent = data.error || "";
+    }
+
+    async function updateStatus() {
+      try {
+        const res = await fetch("/api/status", { cache: "no-store" });
+        if (!res.ok) throw new Error("status failed");
+        applyStatus(await res.json());
+      } catch (err) {
+        setDot("pi-dot", false);
+        setDot("global-pi-dot", false);
+        document.getElementById("pi-status").textContent = "Offline";
+        document.getElementById("global-pi-text").textContent = "Pi offline";
+        errorBox.textContent = "Dashboard connection lost";
+      }
+    }
+
+    document.getElementById("start-surveillance").addEventListener("click", () => post("/api/surveillance/start"));
+    document.getElementById("stop-surveillance").addEventListener("click", () => post("/api/surveillance/stop"));
+    document.getElementById("start-feed").addEventListener("click", () => post("/api/feed/start"));
+    document.getElementById("stop-feed").addEventListener("click", () => post("/api/feed/stop"));
+
+    updateStatus();
+    setInterval(updateStatus, 1500);
+  </script>
+</body>
+</html>
