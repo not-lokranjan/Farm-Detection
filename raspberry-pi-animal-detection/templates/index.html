@@ -497,6 +497,58 @@
 
     .manager input, .manager select, .manager button { min-width: 0; }
 
+    .tabs {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 18px;
+    }
+
+    .tab-page.hidden { display: none; }
+
+    .wide-panel { margin-top: 18px; }
+
+    .archive-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 16px;
+      padding: 18px;
+    }
+
+    .clip video {
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      background: #020407;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+    }
+
+    .clip-actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 10px;
+    }
+
+    .settings-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+    }
+
+    .setting-body {
+      display: grid;
+      gap: 12px;
+      padding: 16px 18px 18px;
+    }
+
+    .inline-actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
     @media (max-width: 900px) {
       header, nav { align-items: flex-start; }
       header { flex-direction: column; }
@@ -507,7 +559,7 @@
       }
       nav { order: 3; }
       nav { justify-content: flex-start; }
-      .grid { grid-template-columns: 1fr; }
+      .grid, .settings-grid { grid-template-columns: 1fr; }
       .controls, .status-strip, .metrics, .manager { grid-template-columns: 1fr; }
       h1 { font-size: 26px; }
     }
@@ -540,11 +592,17 @@
       <nav>
         <span id="user-badge" class="nav-link">Signed out</span>
         <button id="logout">Logout</button>
-        <a class="nav-link" href="#about">About</a>
       </nav>
     </header>
 
-    <main class="grid">
+    <div class="tabs">
+      <button class="primary" data-tab="dashboard">Dashboard</button>
+      <button data-tab="archive">Archive</button>
+      <button data-tab="settings">Settings</button>
+      <a class="nav-link" href="#about">About</a>
+    </div>
+
+    <main id="dashboard-tab" class="grid tab-page">
       <section class="panel feed-panel">
         <div class="feed-head">
           <h2>Live Feed</h2>
@@ -618,10 +676,67 @@
           </div>
         </section>
 
-        <section id="user-management" class="panel hidden">
-          <div class="panel-head">
-            <h2>User Management</h2>
+      </aside>
+    </main>
+
+    <main id="archive-tab" class="tab-page hidden">
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Clip Archive</h2>
+          <button id="refresh-clips">Refresh</button>
+        </div>
+        <div id="clip-archive" class="archive-grid">
+          <div class="empty">No clips recorded</div>
+        </div>
+      </section>
+    </main>
+
+    <main id="settings-tab" class="tab-page hidden">
+      <div class="settings-grid">
+        <section class="panel">
+          <div class="panel-head"><h2>Security</h2></div>
+          <form id="password-form" class="setting-body">
+            <label>Current Password<input id="current-password" type="password" autocomplete="current-password"></label>
+            <label>New Password<input id="new-account-password" type="password" autocomplete="new-password"></label>
+            <button class="primary" type="submit">Reset Password</button>
+            <div id="password-message" class="empty"></div>
+          </form>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head"><h2>Notifications</h2></div>
+          <div class="setting-body">
+            <label><span>Phone Alerts</span><select id="notifications-enabled"><option value="1">Enabled</option><option value="0">Disabled</option></select></label>
           </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head"><h2>Storage</h2></div>
+          <div class="setting-body">
+            <label><span>Record Detection Clips</span><select id="recording-enabled"><option value="1">Enabled</option><option value="0">Disabled</option></select></label>
+            <label><span>Keep Videos</span><select id="retention-days"><option value="7">1 week</option><option value="14">2 weeks</option><option value="30">30 days</option><option value="60">60 days</option><option value="90">90 days</option></select></label>
+            <label><span>Recording FPS</span><input id="recording-fps" type="number" min="4" max="24" step="1"></label>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head"><h2>Camera</h2></div>
+          <div class="setting-body">
+            <label><span>Camera Source</span><input id="camera-source" placeholder="Auto, 0, 1, or /dev/video0"></label>
+            <div class="empty">Camera changes apply next time feed or surveillance starts.</div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head"><h2>Permissions</h2></div>
+          <div class="setting-body">
+            <label><span>Viewer Feed Access</span><select id="viewer-feed-access"><option value="1">Allowed</option><option value="0">Blocked</option></select></label>
+            <div class="inline-actions"><button class="primary" id="save-settings" type="button">Save Settings</button><span id="settings-message" class="empty"></span></div>
+          </div>
+        </section>
+
+        <section id="user-management" class="panel hidden">
+          <div class="panel-head"><h2>User Management</h2></div>
           <form id="create-user-form" class="manager">
             <input id="new-username" placeholder="Username" autocomplete="off">
             <select id="new-role">
@@ -634,7 +749,7 @@
           </form>
           <div id="users" class="compact-list"></div>
         </section>
-      </aside>
+      </div>
     </main>
 
     <section id="about" class="about">
@@ -657,6 +772,7 @@
     const loginForm = document.getElementById("login-form");
     const loginError = document.getElementById("login-error");
     let currentUser = null;
+    let currentSettings = null;
     let streamActive = false;
     let latestEventId = 0;
     let toastTimer = null;
@@ -682,6 +798,12 @@
       return currentUser && ["admin", "operator"].includes(currentUser.role);
     }
 
+    function canAccessFeed() {
+      if (!currentUser) return false;
+      if (["admin", "operator"].includes(currentUser.role)) return true;
+      return currentSettings ? currentSettings.viewerFeedAccess : true;
+    }
+
     function showLogin() {
       auth.classList.add("show");
     }
@@ -697,6 +819,25 @@
       ["start-surveillance", "stop-surveillance"].forEach(id => {
         document.getElementById(id).disabled = !canControl();
       });
+      ["start-feed", "stop-feed"].forEach(id => {
+        document.getElementById(id).disabled = !canAccessFeed();
+      });
+    }
+
+    function switchTab(name) {
+      document.querySelectorAll(".tab-page").forEach(page => page.classList.add("hidden"));
+      document.getElementById(`${name}-tab`).classList.remove("hidden");
+      document.querySelectorAll("[data-tab]").forEach(button => button.classList.toggle("primary", button.dataset.tab === name));
+      if (name === "archive") loadClips();
+      if (name === "settings") {
+        loadSettings();
+        loadUsers();
+      }
+    }
+
+    function formatSize(bytes) {
+      if (!bytes) return "0 MB";
+      return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
     }
 
     function setDot(id, ok, warn = false) {
@@ -763,6 +904,7 @@
       feed.classList.toggle("live", data.liveFeedOn);
 
       const power = data.power || {};
+      currentSettings = data.settings || currentSettings;
       applyUser(data.user || currentUser);
       document.getElementById("cpu").textContent = power.cpuPercent == null ? "--" : `${Math.round(power.cpuPercent)}%`;
       document.getElementById("memory").textContent = power.memoryPercent == null ? "--" : `${Math.round(power.memoryPercent)}%`;
@@ -813,10 +955,60 @@
       const data = await res.json();
       document.getElementById("users").innerHTML = data.users.map(user => `
         <div class="row-item">
-          <strong><span>${user.username}</span><span>${user.role}</span></strong>
+          <strong><span>${user.username}</span><span>${user.active ? "active" : "disabled"}</span></strong>
           <small>${user.active ? "active" : "disabled"} · created ${user.created_at}</small>
+          <div class="inline-actions">
+            <select data-role-user="${user.id}">
+              <option value="viewer" ${user.role === "viewer" ? "selected" : ""}>Viewer</option>
+              <option value="operator" ${user.role === "operator" ? "selected" : ""}>Operator</option>
+              <option value="admin" ${user.role === "admin" ? "selected" : ""}>Admin</option>
+            </select>
+            <button data-save-role="${user.id}">Save Role</button>
+            <button data-toggle-active="${user.id}" data-active="${user.active ? "0" : "1"}">${user.active ? "Disable" : "Enable"}</button>
+          </div>
+          <div class="inline-actions">
+            <input data-reset-password="${user.id}" type="password" placeholder="New password">
+            <button data-save-password="${user.id}">Reset</button>
+          </div>
         </div>
       `).join("");
+    }
+
+    async function loadSettings() {
+      if (!currentUser) return;
+      const res = await fetch("/api/settings", { cache: "no-store" });
+      if (!res.ok) return;
+      const data = await res.json();
+      currentSettings = data.settings;
+      document.getElementById("notifications-enabled").value = currentSettings.notificationsEnabled ? "1" : "0";
+      document.getElementById("recording-enabled").value = currentSettings.recordingEnabled ? "1" : "0";
+      document.getElementById("retention-days").value = String(currentSettings.retentionDays);
+      document.getElementById("recording-fps").value = currentSettings.recordingFps;
+      document.getElementById("viewer-feed-access").value = currentSettings.viewerFeedAccess ? "1" : "0";
+      document.getElementById("camera-source").value = currentSettings.cameraSource || "";
+      applyUser(currentUser);
+    }
+
+    async function loadClips() {
+      if (!currentUser) return;
+      const res = await fetch("/api/clips", { cache: "no-store" });
+      if (!res.ok) return;
+      const data = await res.json();
+      const root = document.getElementById("clip-archive");
+      root.innerHTML = data.clips.length ? data.clips.map(clip => {
+        const labels = JSON.parse(clip.labels || "[]").join(", ") || "Detection";
+        return `
+          <div class="row-item clip">
+            <video controls preload="metadata" src="${clip.url}"></video>
+            <strong><span>${labels}</span><span>${clip.peak_confidence || "--"}%</span></strong>
+            <small>${clip.started_at} -> ${clip.ended_at || "active"} · ${formatSize(clip.sizeBytes)}</small>
+            <div class="clip-actions">
+              <a class="nav-link" href="${clip.url}" target="_blank" rel="noreferrer">Open</a>
+              <button class="danger" data-delete-clip="${clip.id}">Delete</button>
+            </div>
+          </div>
+        `;
+      }).join("") : `<div class="empty">No clips recorded</div>`;
     }
 
     async function updateStatus() {
@@ -885,6 +1077,87 @@
       }
     });
 
+    document.querySelectorAll("[data-tab]").forEach(button => {
+      button.addEventListener("click", () => switchTab(button.dataset.tab));
+    });
+
+    document.getElementById("refresh-clips").addEventListener("click", loadClips);
+
+    document.getElementById("clip-archive").addEventListener("click", async event => {
+      const button = event.target.closest("[data-delete-clip]");
+      if (!button) return;
+      const res = await fetch(`/api/clips/${button.dataset.deleteClip}`, { method: "DELETE" });
+      if (res.ok) await loadClips();
+    });
+
+    document.getElementById("save-settings").addEventListener("click", async () => {
+      const res = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          notificationsEnabled: document.getElementById("notifications-enabled").value === "1",
+          recordingEnabled: document.getElementById("recording-enabled").value === "1",
+          retentionDays: Number(document.getElementById("retention-days").value),
+          recordingFps: Number(document.getElementById("recording-fps").value),
+          viewerFeedAccess: document.getElementById("viewer-feed-access").value === "1",
+          cameraSource: document.getElementById("camera-source").value,
+        }),
+      });
+      document.getElementById("settings-message").textContent = res.ok ? "Saved" : "Save failed";
+      if (res.ok) {
+        const data = await res.json();
+        currentSettings = data.settings;
+        applyUser(currentUser);
+      }
+    });
+
+    document.getElementById("password-form").addEventListener("submit", async event => {
+      event.preventDefault();
+      const res = await fetch("/api/account/password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          currentPassword: document.getElementById("current-password").value,
+          newPassword: document.getElementById("new-account-password").value,
+        }),
+      });
+      document.getElementById("password-message").textContent = res.ok ? "Password changed" : "Password change failed";
+      if (res.ok) event.target.reset();
+    });
+
+    document.getElementById("users").addEventListener("click", async event => {
+      const roleButton = event.target.closest("[data-save-role]");
+      const activeButton = event.target.closest("[data-toggle-active]");
+      const passwordButton = event.target.closest("[data-save-password]");
+      let res = null;
+      if (roleButton) {
+        const id = roleButton.dataset.saveRole;
+        res = await fetch(`/api/users/${id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ role: document.querySelector(`[data-role-user="${id}"]`).value }),
+        });
+      }
+      if (activeButton) {
+        res = await fetch(`/api/users/${activeButton.dataset.toggleActive}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ active: activeButton.dataset.active === "1" }),
+        });
+      }
+      if (passwordButton) {
+        const id = passwordButton.dataset.savePassword;
+        const input = document.querySelector(`[data-reset-password="${id}"]`);
+        res = await fetch(`/api/users/${id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password: input.value }),
+        });
+        input.value = "";
+      }
+      if (res && res.ok) await loadUsers();
+    });
+
     document.getElementById("start-surveillance").addEventListener("click", () => post("/api/surveillance/start"));
     document.getElementById("stop-surveillance").addEventListener("click", () => post("/api/surveillance/stop"));
     document.getElementById("start-feed").addEventListener("click", () => post("/api/feed/start"));
@@ -893,6 +1166,7 @@
     updateStatus();
     loadEvents();
     loadUsers();
+    loadSettings();
     setInterval(updateStatus, 1500);
     setInterval(loadEvents, 5000);
     setInterval(loadUsers, 15000);

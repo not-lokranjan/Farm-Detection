@@ -12,3 +12,5 @@ venv/
 
 # Runtime captures.
 latest_detection.jpg
+detectfield.db
+clips/

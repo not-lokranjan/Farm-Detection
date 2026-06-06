@@ -15,7 +15,7 @@ from urllib import parse, request as urlrequest
 
 import cv2
 import psutil
-from flask import Flask, Response, jsonify, render_template, request, session
+from flask import Flask, Response, jsonify, render_template, request, send_file, session
 from ultralytics import YOLO
 
 
@@ -35,6 +35,16 @@ DEFAULT_ADMIN_USER = os.environ.get("DETECTFIELD_ADMIN_USER", "admin")
 DEFAULT_ADMIN_PASSWORD = os.environ.get("DETECTFIELD_ADMIN_PASSWORD", "detector")
 SESSION_SECRET_PATH = os.environ.get("DETECTFIELD_SECRET_FILE", ".detectfield_secret")
 PRESENCE_EVENT_SECONDS = 15.0
+CLIP_DIR = os.environ.get("DETECTFIELD_CLIP_DIR", "clips")
+SETTINGS_DEFAULTS = {
+    "notifications_enabled": "1",
+    "recording_enabled": "1",
+    "retention_days": "30",
+    "recording_fps": "12",
+    "viewer_feed_access": "1",
+    "camera_source": "",
+}
+LAST_CLIP_CLEANUP = 0.0
 
 HUMAN_LABELS = {"Person", "Man", "Woman", "Boy", "Girl", "Human body"}
 
@@ -171,14 +181,90 @@ def init_db():
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(session_id) REFERENCES detection_sessions(id)
             );
+
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             """
         )
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(detection_sessions)")}
+        if "clip_path" not in columns:
+            conn.execute("ALTER TABLE detection_sessions ADD COLUMN clip_path TEXT")
+        if "clip_created_at" not in columns:
+            conn.execute("ALTER TABLE detection_sessions ADD COLUMN clip_created_at TEXT")
+        if "clip_deleted_at" not in columns:
+            conn.execute("ALTER TABLE detection_sessions ADD COLUMN clip_deleted_at TEXT")
         existing = conn.execute("SELECT id FROM users LIMIT 1").fetchone()
         if not existing:
             conn.execute(
                 "INSERT INTO users (username, password_hash, role, active, created_at) VALUES (?, ?, 'admin', 1, ?)",
                 (DEFAULT_ADMIN_USER, hash_password(DEFAULT_ADMIN_PASSWORD), utc_now()),
             )
+        for key, value in SETTINGS_DEFAULTS.items():
+            conn.execute(
+                "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
+                (key, value),
+            )
+
+
+def load_settings():
+    settings = dict(SETTINGS_DEFAULTS)
+    with db_connect() as conn:
+        rows = conn.execute("SELECT key, value FROM settings").fetchall()
+    settings.update({row["key"]: row["value"] for row in rows})
+    return settings
+
+
+def bool_setting(settings, key):
+    return str(settings.get(key, "0")).lower() in {"1", "true", "yes", "on"}
+
+
+def int_setting(settings, key, minimum, maximum):
+    try:
+        value = int(settings.get(key, SETTINGS_DEFAULTS[key]))
+    except (TypeError, ValueError):
+        value = int(SETTINGS_DEFAULTS[key])
+    return max(minimum, min(maximum, value))
+
+
+def public_settings(settings=None):
+    settings = settings or load_settings()
+    return {
+        "notificationsEnabled": bool_setting(settings, "notifications_enabled"),
+        "recordingEnabled": bool_setting(settings, "recording_enabled"),
+        "retentionDays": int_setting(settings, "retention_days", 7, 365),
+        "recordingFps": int_setting(settings, "recording_fps", 4, 24),
+        "viewerFeedAccess": bool_setting(settings, "viewer_feed_access"),
+        "cameraSource": settings.get("camera_source", ""),
+    }
+
+
+def cleanup_old_clips(settings=None, force=False):
+    global LAST_CLIP_CLEANUP
+    if not force and time.time() - LAST_CLIP_CLEANUP < 3600:
+        return
+    LAST_CLIP_CLEANUP = time.time()
+    settings = settings or load_settings()
+    retention_days = int_setting(settings, "retention_days", 7, 365)
+    cutoff = time.time() - retention_days * 86400
+    with db_connect() as conn:
+        rows = conn.execute(
+            "SELECT id, clip_path FROM detection_sessions WHERE clip_path IS NOT NULL AND clip_deleted_at IS NULL"
+        ).fetchall()
+        for row in rows:
+            path = row["clip_path"]
+            if not path or not os.path.exists(path):
+                continue
+            if os.path.getmtime(path) < cutoff:
+                try:
+                    os.remove(path)
+                except OSError:
+                    continue
+                conn.execute(
+                    "UPDATE detection_sessions SET clip_deleted_at = ?, clip_path = NULL WHERE id = ?",
+                    (utc_now(), row["id"]),
+                )
 
 
 def current_user():
@@ -260,8 +346,17 @@ class SurveillanceEngine:
         self.session_labels = set()
         self.session_peak_confidence = None
         self.last_presence_event_time = 0.0
+        self.settings = load_settings()
+        self.recording_writer = None
+        self.recording_path = None
+        self.recording_session_id = None
+        self.last_record_write = 0.0
         self.notifications = deque(maxlen=50)
         self.error = ""
+
+    def refresh_settings(self):
+        with self.lock:
+            self.settings = load_settings()
 
     def ensure_model(self):
         if self.model is None:
@@ -313,6 +408,7 @@ class SurveillanceEngine:
 
     def _stop_thread_locked(self):
         self.stop_event.set()
+        self._stop_recording()
         self.camera_active = False
         self.last_jpeg = None
         self.last_frame = None
@@ -322,6 +418,12 @@ class SurveillanceEngine:
 
     def _candidate_sources(self):
         configured = os.environ.get("AEGISFIELD_CAMERA", "").strip()
+        if configured:
+            if configured.isdigit():
+                return [int(configured)]
+            return [configured]
+
+        configured = self.settings.get("camera_source", "").strip()
         if configured:
             if configured.isdigit():
                 return [int(configured)]
@@ -383,6 +485,7 @@ class SurveillanceEngine:
                     with self.lock:
                         self.last_frame = display
                         self.last_jpeg = jpeg.tobytes()
+                self._record_clip_frame(display)
 
                 time.sleep(0.001)
         except Exception as exc:
@@ -392,6 +495,7 @@ class SurveillanceEngine:
         finally:
             if self.capture is not None:
                 self.capture.release()
+            self._stop_recording()
             with self.lock:
                 self.capture = None
                 self.camera_active = False
@@ -528,6 +632,7 @@ class SurveillanceEngine:
     def _close_active_session(self):
         if self.active_session_id is None:
             return
+        self._stop_recording()
         with db_connect() as conn:
             conn.execute(
                 "UPDATE detection_sessions SET ended_at = ? WHERE id = ?",
@@ -537,6 +642,52 @@ class SurveillanceEngine:
         self.session_labels = set()
         self.session_peak_confidence = None
         self.last_presence_event_time = 0.0
+
+    def _record_clip_frame(self, frame):
+        with self.lock:
+            session_id = self.active_session_id
+            settings = dict(self.settings)
+        if not session_id or not bool_setting(settings, "recording_enabled"):
+            self._stop_recording()
+            return
+
+        fps = int_setting(settings, "recording_fps", 4, 24)
+        now = time.time()
+        if now - self.last_record_write < 1 / fps:
+            return
+        self.last_record_write = now
+
+        if self.recording_writer is None or self.recording_session_id != session_id:
+            self._start_recording(session_id, frame, fps)
+        if self.recording_writer is not None:
+            self.recording_writer.write(frame)
+
+    def _start_recording(self, session_id, frame, fps):
+        self._stop_recording()
+        os.makedirs(CLIP_DIR, exist_ok=True)
+        filename = f"detectfield-session-{session_id}-{int(time.time())}.mp4"
+        path = os.path.join(CLIP_DIR, filename)
+        height, width = frame.shape[:2]
+        writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
+        if not writer.isOpened():
+            writer.release()
+            return
+        self.recording_writer = writer
+        self.recording_path = path
+        self.recording_session_id = session_id
+        with db_connect() as conn:
+            conn.execute(
+                "UPDATE detection_sessions SET clip_path = ?, clip_created_at = ? WHERE id = ?",
+                (path, utc_now(), session_id),
+            )
+
+    def _stop_recording(self):
+        if self.recording_writer is not None:
+            self.recording_writer.release()
+        self.recording_writer = None
+        self.recording_path = None
+        self.recording_session_id = None
+        self.last_record_write = 0.0
 
     def _push_event(self, event_type, timestamp, label, confidence, message):
         self.last_event_id += 1
@@ -559,7 +710,7 @@ class SurveillanceEngine:
                     "UPDATE detection_sessions SET event_count = event_count + 1 WHERE id = ?",
                     (self.active_session_id,),
                 )
-        if event_type == "detected":
+        if event_type == "detected" and bool_setting(self.settings, "notifications_enabled"):
             send_whatsapp_alert(f"DetectField alert: {message} at {timestamp}.")
 
     def stream(self):
@@ -690,6 +841,76 @@ def update_user(user_id):
     return jsonify({"ok": True})
 
 
+@app.post("/api/account/password")
+@require_role("admin", "operator", "viewer")
+def change_password():
+    payload = request.get_json(silent=True) or {}
+    current_password = str(payload.get("currentPassword", ""))
+    new_password = str(payload.get("newPassword", ""))
+    if len(new_password) < 8:
+        return jsonify({"error": "weak_password"}), 400
+    user = current_user()
+    with db_connect() as conn:
+        row = conn.execute("SELECT password_hash FROM users WHERE id = ?", (user["id"],)).fetchone()
+        if not row or not verify_password(current_password, row["password_hash"]):
+            return jsonify({"error": "invalid_password"}), 401
+        conn.execute(
+            "UPDATE users SET password_hash = ? WHERE id = ?",
+            (hash_password(new_password), user["id"]),
+        )
+    return jsonify({"ok": True})
+
+
+@app.get("/api/settings")
+@require_role("admin", "operator", "viewer")
+def get_settings():
+    return jsonify({"settings": public_settings()})
+
+
+@app.patch("/api/settings")
+@require_role("admin")
+def update_settings():
+    payload = request.get_json(silent=True) or {}
+    updates = {}
+    if "notificationsEnabled" in payload:
+        updates["notifications_enabled"] = "1" if payload["notificationsEnabled"] else "0"
+    if "recordingEnabled" in payload:
+        updates["recording_enabled"] = "1" if payload["recordingEnabled"] else "0"
+    if "viewerFeedAccess" in payload:
+        updates["viewer_feed_access"] = "1" if payload["viewerFeedAccess"] else "0"
+    if "retentionDays" in payload:
+        try:
+            retention = int(payload["retentionDays"])
+        except (TypeError, ValueError):
+            return jsonify({"error": "invalid_retention"}), 400
+        if retention not in {7, 14, 30, 60, 90}:
+            return jsonify({"error": "invalid_retention"}), 400
+        updates["retention_days"] = str(retention)
+    if "recordingFps" in payload:
+        try:
+            updates["recording_fps"] = str(max(4, min(24, int(payload["recordingFps"]))))
+        except (TypeError, ValueError):
+            return jsonify({"error": "invalid_recording_fps"}), 400
+    if "cameraSource" in payload:
+        updates["camera_source"] = str(payload["cameraSource"]).strip()
+    with db_connect() as conn:
+        for key, value in updates.items():
+            conn.execute("UPDATE settings SET value = ? WHERE key = ?", (value, key))
+    engine.refresh_settings()
+    cleanup_old_clips(engine.settings, force=True)
+    return jsonify({"settings": public_settings(engine.settings)})
+
+
+def user_can_access_feed():
+    user = current_user()
+    if not user:
+        return False
+    if user["role"] in {"admin", "operator"}:
+        return True
+    settings = load_settings()
+    return bool_setting(settings, "viewer_feed_access")
+
+
 @app.post("/api/surveillance/start")
 @require_role("admin", "operator")
 def start_surveillance():
@@ -707,6 +928,8 @@ def stop_surveillance():
 @app.post("/api/feed/start")
 @require_role("admin", "operator", "viewer")
 def start_feed():
+    if not user_can_access_feed():
+        return jsonify({"error": "feed_forbidden"}), 403
     engine.start_live_feed()
     return jsonify(engine.snapshot())
 
@@ -714,6 +937,8 @@ def start_feed():
 @app.post("/api/feed/stop")
 @require_role("admin", "operator", "viewer")
 def stop_feed():
+    if not user_can_access_feed():
+        return jsonify({"error": "feed_forbidden"}), 403
     engine.stop_live_feed()
     return jsonify(engine.snapshot())
 
@@ -721,9 +946,11 @@ def stop_feed():
 @app.get("/api/status")
 @require_role("admin", "operator", "viewer")
 def status():
+    cleanup_old_clips()
     payload = engine.snapshot()
     payload["power"] = power_status()
     payload["user"] = current_user()
+    payload["settings"] = public_settings()
     return jsonify(payload)
 
 
@@ -742,6 +969,7 @@ def events():
         session_rows = conn.execute(
             """
             SELECT id, started_at, ended_at, labels, peak_confidence, event_count
+            , clip_path, clip_created_at, clip_deleted_at
             FROM detection_sessions
             ORDER BY id DESC
             LIMIT 30
@@ -755,9 +983,67 @@ def events():
     )
 
 
+@app.get("/api/clips")
+@require_role("admin", "operator", "viewer")
+def clips():
+    cleanup_old_clips()
+    with db_connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, started_at, ended_at, labels, peak_confidence, event_count, clip_path, clip_created_at
+            FROM detection_sessions
+            WHERE clip_path IS NOT NULL AND clip_deleted_at IS NULL
+            ORDER BY id DESC
+            LIMIT 100
+            """
+        ).fetchall()
+    payload = []
+    for row in rows:
+        item = dict(row)
+        path = item.pop("clip_path")
+        item["sizeBytes"] = os.path.getsize(path) if os.path.exists(path) else 0
+        item["url"] = f"/api/clips/{item['id']}/file"
+        payload.append(item)
+    return jsonify({"clips": payload})
+
+
+@app.get("/api/clips/<int:session_id>/file")
+@require_role("admin", "operator", "viewer")
+def clip_file(session_id):
+    with db_connect() as conn:
+        row = conn.execute(
+            "SELECT clip_path FROM detection_sessions WHERE id = ? AND clip_deleted_at IS NULL",
+            (session_id,),
+        ).fetchone()
+    if not row or not row["clip_path"] or not os.path.exists(row["clip_path"]):
+        return jsonify({"error": "not_found"}), 404
+    return send_file(row["clip_path"], mimetype="video/mp4", as_attachment=False)
+
+
+@app.delete("/api/clips/<int:session_id>")
+@require_role("admin", "operator")
+def delete_clip(session_id):
+    if session_id == engine.active_session_id:
+        return jsonify({"error": "clip_active"}), 409
+    with db_connect() as conn:
+        row = conn.execute("SELECT clip_path FROM detection_sessions WHERE id = ?", (session_id,)).fetchone()
+        if not row:
+            return jsonify({"error": "not_found"}), 404
+        path = row["clip_path"]
+        if path and os.path.exists(path):
+            os.remove(path)
+        conn.execute(
+            "UPDATE detection_sessions SET clip_path = NULL, clip_deleted_at = ? WHERE id = ?",
+            (utc_now(), session_id),
+        )
+    return jsonify({"ok": True})
+
+
 @app.get("/stream")
 @require_role("admin", "operator", "viewer")
 def stream():
+    if not user_can_access_feed():
+        return jsonify({"error": "feed_forbidden"}), 403
     return Response(engine.stream(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
 

@@ -75,6 +75,22 @@ Stored records:
 
 The app keeps a short no-detection grace window before closing an event interval, so split-second YOLO misses do not create false exits.
 
+## Clip Archive And Settings
+
+Detection intervals are recorded as MP4 clips in:
+
+```bash
+/home/project/detection/clips
+```
+
+The dashboard has separate tabs:
+
+- Dashboard - live feed, controls, power, detections, event history.
+- Archive - all recorded human/animal detection clips with playback and delete controls.
+- Settings - security, notifications, storage retention, camera source, feed permissions, and user management.
+
+Default clip retention is 30 days. Admins can set retention to 1 week, 2 weeks, 30 days, 60 days, or 90 days. Old clips are deleted automatically; deleting a clip from the Archive removes the video file and marks the database record as deleted.
+
 ## WhatsApp Alerts
 
 WhatsApp alerts are optional and currently wired for Twilio WhatsApp. Set these environment variables in the systemd service or shell:
