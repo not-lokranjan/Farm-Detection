@@ -91,6 +91,17 @@ The dashboard has separate tabs:
 
 Default clip retention is 30 days. Admins can set retention to 1 week, 2 weeks, 30 days, 60 days, or 90 days. Old clips are deleted automatically; deleting a clip from the Archive removes the video file and marks the database record as deleted.
 
+Clips are recorded as fast temporary MJPEG files, then converted in the background to browser-playable H.264 MP4 with `ffmpeg`. This avoids blocking the camera stream while keeping playback reliable in the web dashboard.
+
+Firebase Storage can be used for online clip storage. Configure these on the Pi service, then set `Clip Storage` to `Firebase Storage` in Settings:
+
+```bash
+FIREBASE_STORAGE_BUCKET=your-project.appspot.com
+FIREBASE_SERVICE_ACCOUNT_JSON='{"type":"service_account",...}'
+```
+
+When Firebase is enabled, the Pi uses temporary files only during recording/conversion/upload, then deletes the local video after upload.
+
 ## WhatsApp Alerts
 
 WhatsApp alerts are optional and currently wired for Twilio WhatsApp. Set these environment variables in the systemd service or shell:

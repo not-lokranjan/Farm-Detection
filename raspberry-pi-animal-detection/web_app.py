@@ -9,13 +9,13 @@ import subprocess
 import threading
 import time
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from urllib import parse, request as urlrequest
 
 import cv2
 import psutil
-from flask import Flask, Response, jsonify, render_template, request, send_file, session
+from flask import Flask, Response, jsonify, redirect, render_template, request, send_file, session
 from ultralytics import YOLO
 
 
@@ -40,9 +40,10 @@ SETTINGS_DEFAULTS = {
     "notifications_enabled": "1",
     "recording_enabled": "1",
     "retention_days": "30",
-    "recording_fps": "12",
+    "recording_fps": "8",
     "viewer_feed_access": "1",
     "camera_source": "",
+    "clip_storage": "local",
 }
 LAST_CLIP_CLEANUP = 0.0
 
@@ -195,6 +196,14 @@ def init_db():
             conn.execute("ALTER TABLE detection_sessions ADD COLUMN clip_created_at TEXT")
         if "clip_deleted_at" not in columns:
             conn.execute("ALTER TABLE detection_sessions ADD COLUMN clip_deleted_at TEXT")
+        if "clip_url" not in columns:
+            conn.execute("ALTER TABLE detection_sessions ADD COLUMN clip_url TEXT")
+        if "storage_provider" not in columns:
+            conn.execute("ALTER TABLE detection_sessions ADD COLUMN storage_provider TEXT")
+        if "upload_status" not in columns:
+            conn.execute("ALTER TABLE detection_sessions ADD COLUMN upload_status TEXT")
+        if "clip_remote_path" not in columns:
+            conn.execute("ALTER TABLE detection_sessions ADD COLUMN clip_remote_path TEXT")
         existing = conn.execute("SELECT id FROM users LIMIT 1").fetchone()
         if not existing:
             conn.execute(
@@ -237,7 +246,65 @@ def public_settings(settings=None):
         "recordingFps": int_setting(settings, "recording_fps", 4, 24),
         "viewerFeedAccess": bool_setting(settings, "viewer_feed_access"),
         "cameraSource": settings.get("camera_source", ""),
+        "clipStorage": settings.get("clip_storage", "local"),
     }
+
+
+def firebase_bucket():
+    bucket_name = os.environ.get("FIREBASE_STORAGE_BUCKET", "").strip()
+    if not bucket_name:
+        return None
+    service_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON", "").strip()
+    if service_json:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".firebase-service-account.json")
+        if not os.path.exists(path):
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(service_json)
+            os.chmod(path, 0o600)
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = path
+    try:
+        from google.cloud import storage
+    except Exception:
+        return None
+    try:
+        return storage.Client().bucket(bucket_name)
+    except Exception:
+        return None
+
+
+def upload_clip_to_firebase(local_path, session_id):
+    bucket = firebase_bucket()
+    if bucket is None:
+        return None
+    blob_name = f"detectfield/clips/session-{session_id}-{os.path.basename(local_path)}"
+    blob = bucket.blob(blob_name)
+    blob.upload_from_filename(local_path, content_type="video/mp4")
+    return {
+        "remote_path": blob_name,
+        "url": blob.generate_signed_url(expiration=datetime.now(timezone.utc) + timedelta(days=7)),
+    }
+
+
+def firebase_signed_url(remote_path):
+    bucket = firebase_bucket()
+    if bucket is None or not remote_path:
+        return None
+    try:
+        return bucket.blob(remote_path).generate_signed_url(
+            expiration=datetime.now(timezone.utc) + timedelta(days=7)
+        )
+    except Exception:
+        return None
+
+
+def delete_firebase_clip(remote_path):
+    bucket = firebase_bucket()
+    if bucket is None or not remote_path:
+        return
+    try:
+        bucket.blob(remote_path).delete()
+    except Exception:
+        pass
 
 
 def cleanup_old_clips(settings=None, force=False):
@@ -250,19 +317,33 @@ def cleanup_old_clips(settings=None, force=False):
     cutoff = time.time() - retention_days * 86400
     with db_connect() as conn:
         rows = conn.execute(
-            "SELECT id, clip_path FROM detection_sessions WHERE clip_path IS NOT NULL AND clip_deleted_at IS NULL"
+            """
+            SELECT id, clip_path, clip_remote_path, clip_created_at
+            FROM detection_sessions
+            WHERE (clip_path IS NOT NULL OR clip_remote_path IS NOT NULL) AND clip_deleted_at IS NULL
+            """
         ).fetchall()
         for row in rows:
             path = row["clip_path"]
-            if not path or not os.path.exists(path):
-                continue
-            if os.path.getmtime(path) < cutoff:
+            remote_path = row["clip_remote_path"]
+            if path and os.path.exists(path):
+                should_delete = os.path.getmtime(path) < cutoff
+            else:
+                created = row["clip_created_at"] or ""
                 try:
-                    os.remove(path)
+                    created_ts = datetime.fromisoformat(created.replace("Z", "+00:00")).timestamp()
+                except ValueError:
+                    created_ts = time.time()
+                should_delete = bool(remote_path) and created_ts < cutoff
+            if should_delete:
+                try:
+                    if path and os.path.exists(path):
+                        os.remove(path)
+                    delete_firebase_clip(remote_path)
                 except OSError:
                     continue
                 conn.execute(
-                    "UPDATE detection_sessions SET clip_deleted_at = ?, clip_path = NULL WHERE id = ?",
+                    "UPDATE detection_sessions SET clip_deleted_at = ?, clip_path = NULL, clip_url = NULL, clip_remote_path = NULL WHERE id = ?",
                     (utc_now(), row["id"]),
                 )
 
@@ -665,29 +746,111 @@ class SurveillanceEngine:
     def _start_recording(self, session_id, frame, fps):
         self._stop_recording()
         os.makedirs(CLIP_DIR, exist_ok=True)
-        filename = f"detectfield-session-{session_id}-{int(time.time())}.mp4"
+        filename = f"detectfield-session-{session_id}-{int(time.time())}.avi"
         path = os.path.join(CLIP_DIR, filename)
         height, width = frame.shape[:2]
-        writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
+        writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"MJPG"), fps, (width, height))
         if not writer.isOpened():
             writer.release()
+            with db_connect() as conn:
+                conn.execute(
+                    "UPDATE detection_sessions SET upload_status = ? WHERE id = ?",
+                    ("recording_failed", session_id),
+                )
             return
         self.recording_writer = writer
         self.recording_path = path
         self.recording_session_id = session_id
         with db_connect() as conn:
             conn.execute(
-                "UPDATE detection_sessions SET clip_path = ?, clip_created_at = ? WHERE id = ?",
-                (path, utc_now(), session_id),
+                "UPDATE detection_sessions SET clip_path = ?, clip_created_at = ?, storage_provider = ?, upload_status = ? WHERE id = ?",
+                (path, utc_now(), self.settings.get("clip_storage", "firebase"), "recording", session_id),
             )
 
     def _stop_recording(self):
+        path = self.recording_path
+        session_id = self.recording_session_id
         if self.recording_writer is not None:
             self.recording_writer.release()
         self.recording_writer = None
         self.recording_path = None
         self.recording_session_id = None
         self.last_record_write = 0.0
+        if path and session_id:
+            threading.Thread(target=self._finalize_clip, args=(path, session_id), daemon=True).start()
+
+    def _finalize_clip(self, path, session_id):
+        storage_provider = self.settings.get("clip_storage", "firebase")
+        mp4_path = os.path.splitext(path)[0] + ".mp4"
+        status = "processing"
+        clip_url = None
+        remote_path = None
+        with db_connect() as conn:
+            conn.execute(
+                "UPDATE detection_sessions SET upload_status = ? WHERE id = ?",
+                (status, session_id),
+            )
+
+        converted = self._convert_clip_for_browser(path, mp4_path)
+        final_path = mp4_path if converted else path
+
+        if storage_provider == "firebase":
+            uploaded = upload_clip_to_firebase(final_path, session_id)
+            if not uploaded:
+                status = "upload_failed_local_ready"
+                storage_provider = "local"
+            else:
+                clip_url = uploaded["url"]
+                remote_path = uploaded["remote_path"]
+                status = "uploaded"
+                try:
+                    if os.path.exists(final_path):
+                        os.remove(final_path)
+                except OSError:
+                    pass
+        else:
+            status = "stored"
+
+        try:
+            if converted and os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            pass
+
+        with db_connect() as conn:
+            conn.execute(
+                """
+                UPDATE detection_sessions
+                SET clip_path = ?, clip_url = ?, clip_remote_path = ?, storage_provider = ?, upload_status = ?
+                WHERE id = ?
+                """,
+                (None if clip_url else final_path, clip_url, remote_path, storage_provider, status, session_id),
+            )
+
+    def _convert_clip_for_browser(self, source_path, output_path):
+        command = [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            source_path,
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            output_path,
+        ]
+        try:
+            subprocess.check_call(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return os.path.exists(output_path) and os.path.getsize(output_path) > 0
+        except Exception:
+            return False
 
     def _push_event(self, event_type, timestamp, label, confidence, message):
         self.last_event_id += 1
@@ -893,6 +1056,11 @@ def update_settings():
             return jsonify({"error": "invalid_recording_fps"}), 400
     if "cameraSource" in payload:
         updates["camera_source"] = str(payload["cameraSource"]).strip()
+    if "clipStorage" in payload:
+        clip_storage = str(payload["clipStorage"]).strip()
+        if clip_storage not in {"local", "firebase"}:
+            return jsonify({"error": "invalid_clip_storage"}), 400
+        updates["clip_storage"] = clip_storage
     with db_connect() as conn:
         for key, value in updates.items():
             conn.execute("UPDATE settings SET value = ? WHERE key = ?", (value, key))
@@ -969,7 +1137,7 @@ def events():
         session_rows = conn.execute(
             """
             SELECT id, started_at, ended_at, labels, peak_confidence, event_count
-            , clip_path, clip_created_at, clip_deleted_at
+            , clip_path, clip_url, clip_created_at, clip_deleted_at, upload_status, storage_provider
             FROM detection_sessions
             ORDER BY id DESC
             LIMIT 30
@@ -990,9 +1158,11 @@ def clips():
     with db_connect() as conn:
         rows = conn.execute(
             """
-            SELECT id, started_at, ended_at, labels, peak_confidence, event_count, clip_path, clip_created_at
+            SELECT id, started_at, ended_at, labels, peak_confidence, event_count, clip_path, clip_url,
+                   clip_remote_path, clip_created_at, upload_status, storage_provider
             FROM detection_sessions
-            WHERE clip_path IS NOT NULL AND clip_deleted_at IS NULL
+            WHERE (clip_path IS NOT NULL OR clip_url IS NOT NULL OR upload_status IN ('recording', 'processing'))
+              AND clip_deleted_at IS NULL
             ORDER BY id DESC
             LIMIT 100
             """
@@ -1001,8 +1171,11 @@ def clips():
     for row in rows:
         item = dict(row)
         path = item.pop("clip_path")
-        item["sizeBytes"] = os.path.getsize(path) if os.path.exists(path) else 0
-        item["url"] = f"/api/clips/{item['id']}/file"
+        remote_path = item.pop("clip_remote_path")
+        item["sizeBytes"] = os.path.getsize(path) if path and os.path.exists(path) else 0
+        item["url"] = item.get("clip_url") or f"/api/clips/{item['id']}/file"
+        if item.get("storage_provider") == "firebase" and remote_path:
+            item["url"] = firebase_signed_url(remote_path) or item["url"]
         payload.append(item)
     return jsonify({"clips": payload})
 
@@ -1012,9 +1185,11 @@ def clips():
 def clip_file(session_id):
     with db_connect() as conn:
         row = conn.execute(
-            "SELECT clip_path FROM detection_sessions WHERE id = ? AND clip_deleted_at IS NULL",
+            "SELECT clip_path, clip_url FROM detection_sessions WHERE id = ? AND clip_deleted_at IS NULL",
             (session_id,),
         ).fetchone()
+    if row and row["clip_url"]:
+        return redirect(row["clip_url"])
     if not row or not row["clip_path"] or not os.path.exists(row["clip_path"]):
         return jsonify({"error": "not_found"}), 404
     return send_file(row["clip_path"], mimetype="video/mp4", as_attachment=False)
@@ -1026,14 +1201,18 @@ def delete_clip(session_id):
     if session_id == engine.active_session_id:
         return jsonify({"error": "clip_active"}), 409
     with db_connect() as conn:
-        row = conn.execute("SELECT clip_path FROM detection_sessions WHERE id = ?", (session_id,)).fetchone()
+        row = conn.execute(
+            "SELECT clip_path, clip_remote_path FROM detection_sessions WHERE id = ?",
+            (session_id,),
+        ).fetchone()
         if not row:
             return jsonify({"error": "not_found"}), 404
         path = row["clip_path"]
         if path and os.path.exists(path):
             os.remove(path)
+        delete_firebase_clip(row["clip_remote_path"])
         conn.execute(
-            "UPDATE detection_sessions SET clip_path = NULL, clip_deleted_at = ? WHERE id = ?",
+            "UPDATE detection_sessions SET clip_path = NULL, clip_url = NULL, clip_remote_path = NULL, clip_deleted_at = ? WHERE id = ?",
             (utc_now(), session_id),
         )
     return jsonify({"ok": True})

@@ -2,3 +2,4 @@ flask
 opencv-python
 psutil
 ultralytics
+google-cloud-storage

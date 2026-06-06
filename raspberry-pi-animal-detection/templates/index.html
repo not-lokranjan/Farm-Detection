@@ -416,6 +416,44 @@
       font-size: 14px;
     }
 
+    .modal {
+      position: fixed;
+      inset: 0;
+      display: none;
+      place-items: center;
+      padding: 24px;
+      background: rgba(2, 5, 8, 0.86);
+      backdrop-filter: blur(16px);
+      z-index: 35;
+    }
+
+    .modal.show { display: grid; }
+
+    .modal-box {
+      width: min(1080px, 100%);
+      border: 1px solid rgba(142, 240, 255, 0.28);
+      border-radius: 8px;
+      background: rgba(9, 17, 26, 0.98);
+      box-shadow: 0 30px 90px rgba(0, 0, 0, 0.55);
+      overflow: hidden;
+    }
+
+    .modal-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .modal video {
+      width: 100%;
+      max-height: 74vh;
+      display: block;
+      background: #020407;
+    }
+
     .auth {
       position: fixed;
       inset: 0;
@@ -714,6 +752,7 @@
           <div class="panel-head"><h2>Storage</h2></div>
           <div class="setting-body">
             <label><span>Record Detection Clips</span><select id="recording-enabled"><option value="1">Enabled</option><option value="0">Disabled</option></select></label>
+            <label><span>Clip Storage</span><select id="clip-storage"><option value="local">Local until Firebase ready</option><option value="firebase">Firebase Storage</option></select></label>
             <label><span>Keep Videos</span><select id="retention-days"><option value="7">1 week</option><option value="14">2 weeks</option><option value="30">30 days</option><option value="60">60 days</option><option value="90">90 days</option></select></label>
             <label><span>Recording FPS</span><input id="recording-fps" type="number" min="4" max="24" step="1"></label>
           </div>
@@ -761,6 +800,15 @@
       </p>
     </section>
   </div>
+  <div id="clip-modal" class="modal">
+    <div class="modal-box">
+      <div class="modal-head">
+        <h2 id="clip-modal-title">Detection Clip</h2>
+        <button id="close-clip-modal">Close</button>
+      </div>
+      <video id="clip-modal-video" controls autoplay></video>
+    </div>
+  </div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
   <script>
@@ -771,6 +819,9 @@
     const auth = document.getElementById("auth");
     const loginForm = document.getElementById("login-form");
     const loginError = document.getElementById("login-error");
+    const clipModal = document.getElementById("clip-modal");
+    const clipModalVideo = document.getElementById("clip-modal-video");
+    const clipModalTitle = document.getElementById("clip-modal-title");
     let currentUser = null;
     let currentSettings = null;
     let streamActive = false;
@@ -982,6 +1033,7 @@
       currentSettings = data.settings;
       document.getElementById("notifications-enabled").value = currentSettings.notificationsEnabled ? "1" : "0";
       document.getElementById("recording-enabled").value = currentSettings.recordingEnabled ? "1" : "0";
+      document.getElementById("clip-storage").value = currentSettings.clipStorage || "local";
       document.getElementById("retention-days").value = String(currentSettings.retentionDays);
       document.getElementById("recording-fps").value = currentSettings.recordingFps;
       document.getElementById("viewer-feed-access").value = currentSettings.viewerFeedAccess ? "1" : "0";
@@ -997,13 +1049,14 @@
       const root = document.getElementById("clip-archive");
       root.innerHTML = data.clips.length ? data.clips.map(clip => {
         const labels = JSON.parse(clip.labels || "[]").join(", ") || "Detection";
+        const ready = ["stored", "uploaded", "upload_failed_local_ready"].includes(clip.upload_status);
         return `
           <div class="row-item clip">
-            <video controls preload="metadata" src="${clip.url}"></video>
+            ${ready ? `<video controls preload="metadata" src="${clip.url}"></video>` : `<div class="empty">Clip ${clip.upload_status || "processing"}</div>`}
             <strong><span>${labels}</span><span>${clip.peak_confidence || "--"}%</span></strong>
-            <small>${clip.started_at} -> ${clip.ended_at || "active"} · ${formatSize(clip.sizeBytes)}</small>
+            <small>${clip.started_at} -> ${clip.ended_at || "active"} · ${clip.upload_status || "stored"} · ${formatSize(clip.sizeBytes)}</small>
             <div class="clip-actions">
-              <a class="nav-link" href="${clip.url}" target="_blank" rel="noreferrer">Open</a>
+              <button data-play-clip="${clip.url}" data-clip-title="${labels}" ${ready ? "" : "disabled"}>Play Large</button>
               <button class="danger" data-delete-clip="${clip.id}">Delete</button>
             </div>
           </div>
@@ -1085,9 +1138,24 @@
 
     document.getElementById("clip-archive").addEventListener("click", async event => {
       const button = event.target.closest("[data-delete-clip]");
-      if (!button) return;
-      const res = await fetch(`/api/clips/${button.dataset.deleteClip}`, { method: "DELETE" });
-      if (res.ok) await loadClips();
+      const playButton = event.target.closest("[data-play-clip]");
+      if (playButton) {
+        clipModalTitle.textContent = playButton.dataset.clipTitle || "Detection Clip";
+        clipModalVideo.src = playButton.dataset.playClip;
+        clipModal.classList.add("show");
+        clipModalVideo.play().catch(() => {});
+        return;
+      }
+      if (button) {
+        const res = await fetch(`/api/clips/${button.dataset.deleteClip}`, { method: "DELETE" });
+        if (res.ok) await loadClips();
+      }
+    });
+
+    document.getElementById("close-clip-modal").addEventListener("click", () => {
+      clipModal.classList.remove("show");
+      clipModalVideo.pause();
+      clipModalVideo.removeAttribute("src");
     });
 
     document.getElementById("save-settings").addEventListener("click", async () => {
@@ -1097,6 +1165,7 @@
         body: JSON.stringify({
           notificationsEnabled: document.getElementById("notifications-enabled").value === "1",
           recordingEnabled: document.getElementById("recording-enabled").value === "1",
+          clipStorage: document.getElementById("clip-storage").value,
           retentionDays: Number(document.getElementById("retention-days").value),
           recordingFps: Number(document.getElementById("recording-fps").value),
           viewerFeedAccess: document.getElementById("viewer-feed-access").value === "1",
