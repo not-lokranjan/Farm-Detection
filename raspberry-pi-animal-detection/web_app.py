@@ -430,6 +430,7 @@ class SurveillanceEngine:
         self.session_peak_confidence = None
         self.last_presence_event_time = 0.0
         self.settings = load_settings()
+        self.recording_lock = threading.RLock()
         self.recording_writer = None
         self.recording_path = None
         self.recording_session_id = None
@@ -718,18 +719,19 @@ class SurveillanceEngine:
             )
 
     def _close_active_session(self):
-        if self.active_session_id is None:
+        session_id = self.active_session_id
+        if session_id is None:
             return
-        self._stop_recording()
         with db_connect() as conn:
             conn.execute(
                 "UPDATE detection_sessions SET ended_at = ? WHERE id = ?",
-                (utc_now(), self.active_session_id),
+                (utc_now(), session_id),
             )
         self.active_session_id = None
         self.session_labels = set()
         self.session_peak_confidence = None
         self.last_presence_event_time = 0.0
+        self._stop_recording()
 
     def _record_clip_frame(self, frame):
         with self.lock:
@@ -745,13 +747,14 @@ class SurveillanceEngine:
             return
         self.last_record_write = now
 
-        if self.recording_writer is None or self.recording_session_id != session_id:
-            self._start_recording(session_id, frame, fps)
-        if self.recording_writer is not None:
-            self.recording_writer.write(frame)
+        with self.recording_lock:
+            if self.recording_writer is None or self.recording_session_id != session_id:
+                self._start_recording_locked(session_id, frame, fps)
+            if self.recording_writer is not None and self.recording_session_id == session_id:
+                self.recording_writer.write(frame)
 
-    def _start_recording(self, session_id, frame, fps):
-        self._stop_recording()
+    def _start_recording_locked(self, session_id, frame, fps):
+        self._stop_recording_locked()
         os.makedirs(CLIP_DIR, exist_ok=True)
         filename = f"detectfield-session-{session_id}-{int(time.time())}.avi"
         path = os.path.join(CLIP_DIR, filename)
@@ -775,6 +778,10 @@ class SurveillanceEngine:
             )
 
     def _stop_recording(self):
+        with self.recording_lock:
+            self._stop_recording_locked()
+
+    def _stop_recording_locked(self):
         path = self.recording_path
         session_id = self.recording_session_id
         if self.recording_writer is not None:
@@ -859,6 +866,34 @@ class SurveillanceEngine:
         except Exception:
             return False
 
+    def recover_stale_recordings(self):
+        with db_connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, clip_path
+                FROM detection_sessions
+                WHERE clip_path IS NOT NULL
+                  AND clip_deleted_at IS NULL
+                  AND upload_status IN ('recording', 'processing')
+                """
+            ).fetchall()
+            for row in rows:
+                if row["clip_path"] and os.path.exists(row["clip_path"]):
+                    conn.execute(
+                        "UPDATE detection_sessions SET ended_at = COALESCE(ended_at, ?) WHERE id = ?",
+                        (utc_now(), row["id"]),
+                    )
+                    threading.Thread(
+                        target=self._finalize_clip,
+                        args=(row["clip_path"], row["id"]),
+                        daemon=True,
+                    ).start()
+                else:
+                    conn.execute(
+                        "UPDATE detection_sessions SET upload_status = ? WHERE id = ?",
+                        ("missing_file", row["id"]),
+                    )
+
     def _push_event(self, event_type, timestamp, label, confidence, message):
         self.last_event_id += 1
         event = {
@@ -917,6 +952,7 @@ app = Flask(__name__)
 app.secret_key = load_secret_key()
 init_db()
 engine = SurveillanceEngine()
+engine.recover_stale_recordings()
 
 
 @app.route("/")
