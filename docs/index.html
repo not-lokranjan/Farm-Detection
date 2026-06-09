@@ -110,7 +110,7 @@
       margin-top: 28px;
     }
 
-    a.button {
+    .button {
       min-height: 44px;
       padding: 0 18px;
       border-radius: 8px;
@@ -122,11 +122,18 @@
       justify-content: center;
       text-decoration: none;
       font-weight: 700;
+      cursor: pointer;
+      font: inherit;
     }
 
-    a.button.primary {
+    .button.primary {
       background: linear-gradient(135deg, rgba(39, 217, 255, 0.28), rgba(84, 255, 159, 0.16));
       border-color: rgba(39, 217, 255, 0.65);
+    }
+
+    .button[disabled] {
+      opacity: 0.55;
+      cursor: not-allowed;
     }
 
     .status {
@@ -241,7 +248,7 @@
         <p>Raspberry Pi computer vision for farm surveillance. YOLO watches the camera feed for humans and wildlife, then the local dashboard opens the live feed and records detection events.</p>
         <p id="piMessage">Checking whether the Raspberry Pi dashboard is reachable on this network.</p>
         <div class="actions">
-          <a class="button primary" href="http://rpi.local:8080/" id="piLink">Open Pi Dashboard</a>
+          <button class="button primary" id="piLink" type="button" disabled>Checking Pi</button>
           <a class="button" href="https://github.com/not-lokranjan/Farm-Detection" id="repoLink">View Code</a>
         </div>
       </div>
@@ -282,7 +289,7 @@
       piStatus.textContent = state === "online" ? "Pi online" : state === "offline" ? "Pi not online" : "Checking Pi";
       piMessage.textContent = message;
       piLink.textContent = piReachable ? "Open Pi Dashboard" : "Pi Offline";
-      piLink.setAttribute("aria-disabled", piReachable ? "false" : "true");
+      piLink.disabled = !piReachable;
     }
 
     async function checkPi() {
@@ -319,7 +326,9 @@
       if (!piReachable) {
         event.preventDefault();
         setPiState("offline", "Cannot open dashboard: Pi is not online or rpi.local cannot be reached from this device.");
+        return;
       }
+      window.open(piUrl, "_blank", "noopener");
     });
 
     startPolling();
