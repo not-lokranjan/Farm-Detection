@@ -270,14 +270,19 @@
     const piStatus = document.getElementById("piStatus");
     const piDot = document.getElementById("piDot");
     const piMessage = document.getElementById("piMessage");
+    const piLink = document.getElementById("piLink");
     const piUrl = "http://rpi.local:8080/";
     let controller = null;
     let timer = null;
+    let piReachable = false;
 
     function setPiState(state, message) {
+      piReachable = state === "online";
       piDot.className = `dot ${state}`;
       piStatus.textContent = state === "online" ? "Pi online" : state === "offline" ? "Pi not online" : "Checking Pi";
       piMessage.textContent = message;
+      piLink.textContent = piReachable ? "Open Pi Dashboard" : "Pi Offline";
+      piLink.setAttribute("aria-disabled", piReachable ? "false" : "true");
     }
 
     async function checkPi() {
@@ -308,6 +313,13 @@
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) stopPolling();
       else startPolling();
+    });
+
+    piLink.addEventListener("click", event => {
+      if (!piReachable) {
+        event.preventDefault();
+        setPiState("offline", "Cannot open dashboard: Pi is not online or rpi.local cannot be reached from this device.");
+      }
     });
 
     startPolling();
