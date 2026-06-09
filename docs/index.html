@@ -232,13 +232,14 @@
           <p class="subtitle">DetectField Raspberry Pi surveillance</p>
         </div>
       </div>
-      <div class="status"><span class="dot"></span><span>Pi dashboard local</span></div>
+      <div class="status"><span id="piDot" class="dot"></span><span id="piStatus">Checking Pi</span></div>
     </header>
 
     <section class="hero">
       <div>
         <h1>DetectField</h1>
         <p>Raspberry Pi computer vision for farm surveillance. YOLO watches the camera feed for humans and wildlife, then the local dashboard opens the live feed and records detection events.</p>
+        <p id="piMessage">Checking whether the Raspberry Pi dashboard is reachable on this network.</p>
         <div class="actions">
           <a class="button primary" href="http://rpi.local:8080/" id="piLink">Open Pi Dashboard</a>
           <a class="button" href="https://github.com/not-lokranjan/Farm-Detection" id="repoLink">View Code</a>
@@ -265,6 +266,52 @@
       Static project site for DetectField. Runtime app lives on the Raspberry Pi.
     </footer>
   </main>
+  <script>
+    const piStatus = document.getElementById("piStatus");
+    const piDot = document.getElementById("piDot");
+    const piMessage = document.getElementById("piMessage");
+    const piUrl = "http://rpi.local:8080/";
+    let controller = null;
+    let timer = null;
+
+    function setPiState(state, message) {
+      piDot.className = `dot ${state}`;
+      piStatus.textContent = state === "online" ? "Pi online" : state === "offline" ? "Pi not online" : "Checking Pi";
+      piMessage.textContent = message;
+    }
+
+    async function checkPi() {
+      if (document.hidden) return;
+      if (controller) controller.abort();
+      controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 3500);
+      try {
+        await fetch(piUrl, { mode: "no-cors", cache: "no-store", signal: controller.signal });
+        setPiState("online", "Pi dashboard is reachable on this network.");
+      } catch (error) {
+        setPiState("offline", "Pi is not online or rpi.local cannot be reached from this device.");
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+
+    function startPolling() {
+      checkPi();
+      timer = setInterval(checkPi, 10000);
+    }
+
+    function stopPolling() {
+      clearInterval(timer);
+      if (controller) controller.abort();
+    }
+
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) stopPolling();
+      else startPolling();
+    });
+
+    startPolling();
+  </script>
 
 </body>
 </html>
