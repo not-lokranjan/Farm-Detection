@@ -21,6 +21,7 @@ from ultralytics import YOLO
 
 APP_HOST = "0.0.0.0"
 APP_PORT = 8080
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = "yolov8m-oiv7.pt"
 CAMERA_INDEX = 0
 FRAME_WIDTH = 960
@@ -30,12 +31,12 @@ DETECT_EVERY_SECONDS = 0.75
 DETECTION_CLEAR_SECONDS = 30.0
 STREAM_FPS = 60
 JPEG_QUALITY = 72
-DB_PATH = os.environ.get("DETECTFIELD_DB", "detectfield.db")
+DB_PATH = os.environ.get("DETECTFIELD_DB", os.path.join(BASE_DIR, "detectfield.db"))
 DEFAULT_ADMIN_USER = os.environ.get("DETECTFIELD_ADMIN_USER", "admin")
 DEFAULT_ADMIN_PASSWORD = os.environ.get("DETECTFIELD_ADMIN_PASSWORD", "detector")
-SESSION_SECRET_PATH = os.environ.get("DETECTFIELD_SECRET_FILE", ".detectfield_secret")
+SESSION_SECRET_PATH = os.environ.get("DETECTFIELD_SECRET_FILE", os.path.join(BASE_DIR, ".detectfield_secret"))
 PRESENCE_EVENT_SECONDS = 15.0
-CLIP_DIR = os.environ.get("DETECTFIELD_CLIP_DIR", "clips")
+CLIP_DIR = os.environ.get("DETECTFIELD_CLIP_DIR", os.path.join(BASE_DIR, "clips"))
 SETTINGS_DEFAULTS = {
     "notifications_enabled": "1",
     "recording_enabled": "1",
@@ -774,7 +775,7 @@ class SurveillanceEngine:
         with db_connect() as conn:
             conn.execute(
                 "UPDATE detection_sessions SET clip_path = ?, clip_created_at = ?, storage_provider = ?, upload_status = ? WHERE id = ?",
-                (path, utc_now(), self.settings.get("clip_storage", "firebase"), "recording", session_id),
+                (path, utc_now(), self.settings.get("clip_storage", "local"), "recording", session_id),
             )
 
     def _stop_recording(self):
@@ -794,7 +795,7 @@ class SurveillanceEngine:
             threading.Thread(target=self._finalize_clip, args=(path, session_id), daemon=True).start()
 
     def _finalize_clip(self, path, session_id):
-        storage_provider = self.settings.get("clip_storage", "firebase")
+        storage_provider = self.settings.get("clip_storage", "local")
         mp4_path = os.path.splitext(path)[0] + ".mp4"
         status = "processing"
         clip_url = None
