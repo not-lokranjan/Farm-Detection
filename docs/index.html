@@ -285,10 +285,11 @@
     const piLink = document.getElementById("piLink");
     const localPiUrl = "http://rpi.local:8080/";
     const tailscalePiUrl = "https://detectfield-rpi.taildd0de7.ts.net/";
+    const tailscaleHealthUrl = `${tailscalePiUrl}api/public-health`;
     const canProbeLocalHttp = location.protocol !== "https:";
     const targets = [
-      { name: "Tailscale HTTPS", url: tailscalePiUrl, probe: true },
-      { name: "Local Wi-Fi", url: localPiUrl, probe: canProbeLocalHttp }
+      { name: "Tailscale HTTPS", url: tailscalePiUrl, probeUrl: tailscaleHealthUrl, probe: true },
+      { name: "Local Wi-Fi", url: localPiUrl, probeUrl: localPiUrl, probe: canProbeLocalHttp }
     ];
     let timer = null;
     let probeId = 0;
@@ -315,10 +316,11 @@
     async function probeTarget(target, currentProbe) {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 3000);
-      const probeUrl = `${target.url}?detectfield_probe=${Date.now()}`;
+      const separator = target.probeUrl.includes("?") ? "&" : "?";
+      const probeUrl = `${target.probeUrl}${separator}detectfield_probe=${Date.now()}`;
       try {
         await fetch(probeUrl, {
-          mode: "no-cors",
+          mode: target.probeUrl.startsWith("https://") ? "cors" : "no-cors",
           cache: "no-store",
           redirect: "manual",
           signal: controller.signal

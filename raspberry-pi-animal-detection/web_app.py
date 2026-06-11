@@ -960,6 +960,14 @@ def index():
     return render_template("index.html")
 
 
+@app.get("/api/public-health")
+def public_health():
+    response = jsonify({"ok": True, "service": "DetectField", "time": utc_now()})
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @app.post("/api/auth/login")
 def login():
     payload = request.get_json(silent=True) or {}
