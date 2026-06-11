@@ -279,8 +279,8 @@
     const piMessage = document.getElementById("piMessage");
     const piLink = document.getElementById("piLink");
     const piUrl = "http://rpi.local:8080/";
-    let controller = null;
     let timer = null;
+    let probeId = 0;
     let piReachable = false;
 
     function setPiState(state, message) {
@@ -288,50 +288,61 @@
       piDot.className = `dot ${state}`;
       piStatus.textContent = state === "online" ? "Pi online" : state === "offline" ? "Pi not online" : "Checking Pi";
       piMessage.textContent = message;
-      piLink.textContent = piReachable ? "Open Pi Dashboard" : "Pi Offline";
-      piLink.disabled = !piReachable;
+      piLink.textContent = piReachable ? "Open Pi Dashboard" : "Check Again";
+      piLink.disabled = false;
     }
 
     async function checkPi() {
       if (document.hidden) return;
-      if (controller) controller.abort();
-      controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 3500);
+      const currentProbe = ++probeId;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 2500);
+      const probeUrl = `${piUrl}?detectfield_probe=${Date.now()}`;
+      setPiState("checking", "Checking Raspberry Pi connection...");
       try {
-        await fetch(piUrl, { mode: "no-cors", cache: "no-store", signal: controller.signal });
+        await fetch(probeUrl, {
+          mode: "no-cors",
+          cache: "no-store",
+          redirect: "manual",
+          signal: controller.signal
+        });
+        if (currentProbe !== probeId) return;
         setPiState("online", "Pi dashboard is reachable on this network.");
       } catch (error) {
+        if (currentProbe !== probeId) return;
         setPiState("offline", "Pi is not online or rpi.local cannot be reached from this device.");
       } finally {
         clearTimeout(timeout);
+        scheduleNextCheck();
       }
     }
 
-    function startPolling() {
-      checkPi();
-      timer = setInterval(checkPi, 10000);
+    function scheduleNextCheck() {
+      clearTimeout(timer);
+      if (document.hidden) return;
+      timer = setTimeout(checkPi, piReachable ? 10000 : 2500);
     }
 
     function stopPolling() {
-      clearInterval(timer);
-      if (controller) controller.abort();
+      clearTimeout(timer);
+      timer = null;
     }
 
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) stopPolling();
-      else startPolling();
+      else checkPi();
     });
 
     piLink.addEventListener("click", event => {
       if (!piReachable) {
         event.preventDefault();
-        setPiState("offline", "Cannot open dashboard: Pi is not online or rpi.local cannot be reached from this device.");
+        checkPi();
         return;
       }
       window.open(piUrl, "_blank", "noopener");
     });
 
-    startPolling();
+    checkPi();
   </script>
 
 </body>
