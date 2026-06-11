@@ -168,6 +168,11 @@
       box-shadow: 0 0 16px rgba(255, 93, 115, 0.75);
     }
 
+    .dot.limited {
+      background: var(--amber);
+      box-shadow: 0 0 16px rgba(255, 204, 102, 0.75);
+    }
+
     .grid {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -265,7 +270,7 @@
       </article>
       <article class="panel">
         <h2>GitHub Pages Limit</h2>
-        <p>This page is static. Camera access, YOLO inference, and control buttons still require the Raspberry Pi backend at <code>http://rpi.local:8080</code>.</p>
+        <p>This page checks the HTTPS Tailscale dashboard first. If Tailscale Serve is not enabled, use the local dashboard at <code>http://rpi.local:8080</code> from the same Wi-Fi.</p>
       </article>
     </section>
 
@@ -278,27 +283,39 @@
     const piDot = document.getElementById("piDot");
     const piMessage = document.getElementById("piMessage");
     const piLink = document.getElementById("piLink");
-    const piUrl = "http://rpi.local:8080/";
+    const localPiUrl = "http://rpi.local:8080/";
+    const tailscalePiUrl = "https://detectfield-rpi.taildd0de7.ts.net/";
+    const canProbeLocalHttp = location.protocol !== "https:";
+    const targets = [
+      { name: "Tailscale HTTPS", url: tailscalePiUrl, probe: true },
+      { name: "Local Wi-Fi", url: localPiUrl, probe: canProbeLocalHttp }
+    ];
     let timer = null;
     let probeId = 0;
-    let piReachable = false;
+    let activeTarget = null;
+    let state = "checking";
 
-    function setPiState(state, message) {
-      piReachable = state === "online";
-      piDot.className = `dot ${state}`;
-      piStatus.textContent = state === "online" ? "Pi online" : state === "offline" ? "Pi not online" : "Checking Pi";
+    function setPiState(nextState, message, target = null) {
+      state = nextState;
+      activeTarget = target;
+      piDot.className = `dot ${nextState}`;
+      piStatus.textContent =
+        nextState === "online" ? "Pi online" :
+        nextState === "limited" ? "Manual check needed" :
+        nextState === "offline" ? "Pi not online" :
+        "Checking Pi";
       piMessage.textContent = message;
-      piLink.textContent = piReachable ? "Open Pi Dashboard" : "Check Again";
+      piLink.textContent =
+        nextState === "online" ? `Open ${target.name}` :
+        nextState === "limited" ? "Open Local Dashboard" :
+        "Check Again";
       piLink.disabled = false;
     }
 
-    async function checkPi() {
-      if (document.hidden) return;
-      const currentProbe = ++probeId;
+    async function probeTarget(target, currentProbe) {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 2500);
-      const probeUrl = `${piUrl}?detectfield_probe=${Date.now()}`;
-      setPiState("checking", "Checking Raspberry Pi connection...");
+      const timeout = setTimeout(() => controller.abort(), 3000);
+      const probeUrl = `${target.url}?detectfield_probe=${Date.now()}`;
       try {
         await fetch(probeUrl, {
           mode: "no-cors",
@@ -306,21 +323,47 @@
           redirect: "manual",
           signal: controller.signal
         });
-        if (currentProbe !== probeId) return;
-        setPiState("online", "Pi dashboard is reachable on this network.");
+        return currentProbe === probeId;
       } catch (error) {
-        if (currentProbe !== probeId) return;
-        setPiState("offline", "Pi is not online or rpi.local cannot be reached from this device.");
+        return false;
       } finally {
         clearTimeout(timeout);
-        scheduleNextCheck();
       }
+    }
+
+    async function checkPi() {
+      if (document.hidden) return;
+      const currentProbe = ++probeId;
+      setPiState("checking", "Checking Raspberry Pi connection...");
+
+      for (const target of targets) {
+        if (!target.probe) continue;
+        const reachable = await probeTarget(target, currentProbe);
+        if (currentProbe !== probeId) return;
+        if (reachable) {
+          setPiState("online", `Pi dashboard is reachable through ${target.name}.`, target);
+          scheduleNextCheck();
+          return;
+        }
+      }
+
+      if (currentProbe !== probeId) return;
+      if (!canProbeLocalHttp) {
+        setPiState(
+          "limited",
+          "GitHub Pages cannot verify the local HTTP dashboard. Tailscale HTTPS is not reachable yet; local Wi-Fi dashboard may still work.",
+          targets[1]
+        );
+      } else {
+        setPiState("offline", "Pi is not online or rpi.local cannot be reached from this device.");
+      }
+      scheduleNextCheck();
     }
 
     function scheduleNextCheck() {
       clearTimeout(timer);
       if (document.hidden) return;
-      timer = setTimeout(checkPi, piReachable ? 10000 : 2500);
+      timer = setTimeout(checkPi, state === "online" ? 10000 : 5000);
     }
 
     function stopPolling() {
@@ -334,12 +377,12 @@
     });
 
     piLink.addEventListener("click", event => {
-      if (!piReachable) {
+      if (state === "checking" || state === "offline") {
         event.preventDefault();
         checkPi();
         return;
       }
-      window.open(piUrl, "_blank", "noopener");
+      window.open(activeTarget.url, "_blank", "noopener");
     });
 
     checkPi();
